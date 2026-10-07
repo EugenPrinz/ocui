@@ -118,12 +118,6 @@ local function newGpu(maxW, maxH, opts, address, screen)
     -- is the exit-time clear: snapshot what was shown just before it.
     if state.active == 0 and x == 1 and y == 1 and w >= buf.w and h >= buf.h then
       state.lastFrame = dumpGrid(buf)
-      local copy = {}
-      for yy, row in ipairs(buf.grid) do
-        copy[yy] = {}
-        for xx, c in ipairs(row) do copy[yy][xx] = { ch = c.ch, fg = c.fg, bg = c.bg } end
-      end
-      state.lastGrid = copy
     end
     for row = y, y + h - 1 do
       if buf.grid[row] then
@@ -191,12 +185,7 @@ local function newGpu(maxW, maxH, opts, address, screen)
     local c = state.buffers[0].grid[y][x]
     return c.fg, c.bg, c.ch
   end
-  -- the same for the last frame shown before the app cleared the screen
-  function gpu._lastCell(x, y)
-    local c = state.lastGrid and state.lastGrid[y][x]
-    if not c then return nil end
-    return c.fg, c.bg, c.ch
-  end
+
   function gpu._screen() return dumpGrid(state.buffers[0]) end
 
   return gpu
@@ -448,78 +437,6 @@ function M.renderGlasses(snapshot, colorChars, cols, rows)
   return table.concat(lines, "\n"), texts
 end
 
--- ------------------------------------------------------------ fake internet --
-
--- def = { stream = bytes the server sends, idleEvery = n (every nth read
---         returns "" like a quiet network), refuse = true (connect fails),
---         neverConnect = true (finishConnect stays false) }
-local function newInternet(def)
-  local inet = { type = "internet", sockets = {} }
-  function inet.connect(host, port)
-    if def.refuse then return nil, "address is not allowed" end
-    local sock = { host = host, port = port, written = {}, pos = 1, reads = 0, closed = false }
-    table.insert(inet.sockets, sock)
-    local connectCalls = 0
-    function sock.finishConnect()
-      connectCalls = connectCalls + 1
-      if def.neverConnect then return false end
-      return connectCalls >= 2 -- connected on the second check
-    end
-    function sock.write(data)
-      assert(type(data) == "string")
-      table.insert(sock.written, data)
-      return #data
-    end
-    function sock.read(n)
-      if sock.closed then error("connection lost") end
-      sock.reads = sock.reads + 1
-      n = math.min(n or 2048, 2048) -- OpenComputers' maxReadBuffer
-      if def.idleEvery and sock.reads % def.idleEvery == 0 then return "" end
-      local stream = def.stream or ""
-      if sock.pos > #stream then return nil end -- EOF
-      -- vary chunk sizes so messages straddle reads
-      local size = math.min(n, 300 + (sock.reads * 977) % 1749)
-      local chunk = stream:sub(sock.pos, sock.pos + size - 1)
-      sock.pos = sock.pos + #chunk
-      return chunk
-    end
-    function sock.close() sock.closed = true end
-    return sock
-  end
-
-  -- HTTP: def.http[url] = body string, or { code = 404 }
-  inet.requests = {}
-  function inet.request(url)
-    table.insert(inet.requests, url)
-    local entry = def.http and def.http[url]
-    local h = { reads = 0, pos = 1, closed = false }
-    local checks = 0
-    function h.finishConnect()
-      checks = checks + 1
-      return checks >= 2
-    end
-    function h.response()
-      if type(entry) == "string" then return 200, "OK", {} end
-      return (type(entry) == "table" and entry.code) or 404, "Not Found", {}
-    end
-    function h.read(n)
-      h.reads = h.reads + 1
-      n = math.min(n or 2048, 2048)
-      if type(entry) ~= "string" then return nil end
-      if def.idleEvery and h.reads % def.idleEvery == 0 then return "" end
-      if h.pos > #entry then return nil end
-      local size = math.min(n, 300 + (h.reads * 977) % 1749)
-      local chunk = entry:sub(h.pos, h.pos + size - 1)
-      h.pos = h.pos + #chunk
-      return chunk
-    end
-    function h.close() h.closed = true end
-    inet.lastHttp = h
-    return h
-  end
-  return inet
-end
-
 -- ---------------------------------------------------------------- module --
 
 -- opts: maxW, maxH, noVram, cpus (me_interface defs; nil = no ME),
@@ -556,9 +473,6 @@ function M.new(opts)
     local def = opts.lsc
     local t0 = clock
     register(newLsc(def, function() return now() - t0 end), "lsc-1")
-  end
-  if opts.internet then
-    register(newInternet(opts.internet), "internet-1")
   end
   local glassesList = {}
   for i = 1, opts.glasses or 0 do

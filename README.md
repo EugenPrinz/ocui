@@ -16,7 +16,6 @@ component API used was checked against those exact source tags.
 |---|---|---|
 | `hud` | On AR glasses: LSC charge %, stored/capacity, avg IN/OUT, a scrolling net-flow graph (green = charging, red = draining), time to full/empty, maintenance & wireless flags; below it the busy AE2 crafting CPUs with progress bar, % and ETA | Glasses Terminal + linked AR Glasses; Adapter on the LSC controller; Adapter on an ME Interface/Controller |
 | `dashboard` | On a screen: one panel per crafting CPU with output, progress %, ETA | T2+ GPU and screen; Adapter on an ME Interface/Controller |
-| `tube` | On a screen: video player (picture only) for videos converted by `server/tube_server.py`, played over HTTP (e.g. from a GitHub release, converted by a GitHub Actions workflow — nothing to install) or live from your own PC | Internet Card, T3 GPU + screen |
 | `hudctl` | On a screen: control panel for the HUD (show/hide panels and parts, anchor + offset per panel, width, text size, to-scale preview) and an **Energy** tab: live LSC numbers, net-flow and charge charts over 2 min / 1 h / 24 h, avg/min/max, EU in/out | T2+ GPU and screen (80x25+); an LSC for the Energy tab |
 
 The HUD and the dashboard get their data from shared **services**
@@ -119,7 +118,6 @@ ocui/                 the library — copy this whole folder to /lib/ocui
   theme.lua             screen: default palette
   app.lua               screen: double-buffered UI mounted into a pool
   hud.lua               glasses: Surface, Rect, Text, Bar, Graph, Group, anchors
-  tubeproto.lua         tube stream decoder + frame painter
   ae2.lua               data: crafting CPU tracker (progress + ETA)
   lsc.lua               data: Lapotronic Supercapacitor reader
   services/
@@ -128,21 +126,15 @@ ocui/                 the library — copy this whole folder to /lib/ocui
   apps/
     hud.lua             app: glasses HUD (LSC + autocraft)
     hudctl.lua          app: HUD control panel + energy charts
-    tube.lua            app: video player
     dashboard.lua       app: screen dashboard of crafting CPUs
 
 apps/                  programs — copy to /home or /usr/bin
   ocpool.lua            the launcher/controller
   hud.lua               shortcut: hud alone
   hudctl.lua            shortcut: control panel (+ hud, or the background one)
-  tube.lua              shortcut: tube <name|url> / tube live <src> [host:port]
   ae2_dashboard.lua     shortcut: dashboard alone
 
 install.lua            in-game installer/updater (Internet Card)
-
-server/
-  tube_server.py        video converter (--convert) / live streamer for `tube`
-  tube-workflow.yml     GitHub Actions template for a separate videos repo
 
 mock/                  local test harness — never deployed in-game
   component_factory.lua  fake OpenOS (component/computer/event, gpu,
@@ -181,77 +173,6 @@ Then:
    **AR Glasses** to it (shift-right-click the terminal) and wear them.
 2. Run `hudctl` (panel + HUD), or `ocpool hud dashboard`, or
    `ocpool -b hud` to keep the shell free.
-
-## Video player: `tube`
-
-Picture only, no sound: a fun experiment, not a real video player. Expect
-a chunky 160x100 picture in 256 colors at ~5–10 fps. Black-and-white
-videos (Bad Apple!!) look best.
-
-**How it works.** OpenComputers can't decode video, so
-`server/tube_server.py` converts it:
-
-1. It decodes the video with yt-dlp + ffmpeg and scales it to 160x100
-   pixels.
-2. It packs two pixels into each character cell: an upper half block
-   `▀`, whose foreground is the top pixel and background the bottom one.
-3. It maps the colors onto the exact palette of a tier 3 screen.
-4. It stores only the changed cells, frame by frame.
-
-An Internet Card reads at most 2048 bytes per server tick (~40 KB/s), so
-each frame gets a byte budget that fits the link. The most visible
-changes go first and the rest follow a few frames later, so fast motion
-smears instead of stalling. The player applies changes in a VRAM buffer,
-where drawing costs no call budget, and pushes the picture to the screen
-once per frame.
-
-There are two ways to play.
-
-### Converted file over HTTP (default; nothing to install)
-
-Works on remote servers: if `install.lua` worked, the card can reach
-GitHub.
-
-```
-tube <name>                     # <library><name>.octv
-tube https://.../video.octv     # any URL
-```
-
-`library` in `/etc/ocui/tube.cfg` defaults to the "videos" release of
-[`EugenPrinz/ocui-videos`](https://github.com/EugenPrinz/ocui-videos).
-That repository is kept separate from the code, so whatever lands in its
-release can't affect `ocui`. Converting runs on GitHub's machines:
-
-- `videos.txt` in that repo is the playlist, one `name fps source` per
-  line;
-- editing it, even right in the browser, triggers the workflow
-  ([`server/tube-workflow.yml`](server/tube-workflow.yml) +
-  [`server/tube_library.py`](server/tube_library.py));
-- the workflow converts new or changed videos into the release and
-  removes deleted ones;
-- in game you then run `tube <name>`.
-
-YouTube sometimes refuses GitHub's servers ("Sign in to confirm you're
-not a bot"). A direct link to a video file always works.
-
-### Live from your own PC (`tube live`)
-
-Run `python server/tube_server.py` on a machine the game server can
-reach; it needs yt-dlp + ffmpeg for videos. Then in game:
-
-```
-tube live <url|file|demo> [host:port]
-```
-
-The game server's OpenComputers config must allow TCP, and the address
-must not be filtered. In single-player, add `"allow ip:127.0.0.1",`
-before `"deny private"` in `filteringRules` of
-`config/OpenComputers.cfg`.
-
-Touch the screen to pause, `q` to quit. Downloading from YouTube goes
-against YouTube's terms of service, and publishing other people's videos
-in a public release can draw a takedown notice. Convert your own,
-permitted or freely licensed videos, and delete them after watching.
 
 ## How the numbers are obtained
 
@@ -312,12 +233,6 @@ tests cover:
   remote status/stop/start/quit;
 - config merge and sandboxing;
 - `ocpool list`/`status`, foreground and background runs.
-
-`tube` is covered end to end: `tube_server.py --selftest` runs, the Lua
-and Python palettes are compared, and a stream generated by the server is
-played through a fake Internet Card socket. Every cell on the screen must
-match what the server thinks the client shows, with and without a byte
-budget. Refused connections, timeouts and pause are covered as well.
 
 OpenOS threads are faked: the "detached" pool runs synchronously until a
 scripted `quit`.

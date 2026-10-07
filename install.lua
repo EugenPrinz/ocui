@@ -30,20 +30,17 @@ local FILES = {
   { "ocui/pool.lua",               "/lib/ocui/pool.lua" },
   { "ocui/storage.lua",            "/lib/ocui/storage.lua" },
   { "ocui/theme.lua",              "/lib/ocui/theme.lua" },
-  { "ocui/tubeproto.lua",          "/lib/ocui/tubeproto.lua" },
   { "ocui/util.lua",               "/lib/ocui/util.lua" },
   { "ocui/widget.lua",             "/lib/ocui/widget.lua" },
   { "ocui/widgets.lua",            "/lib/ocui/widgets.lua" },
   { "ocui/apps/dashboard.lua",     "/lib/ocui/apps/dashboard.lua" },
   { "ocui/apps/hud.lua",           "/lib/ocui/apps/hud.lua" },
   { "ocui/apps/hudctl.lua",        "/lib/ocui/apps/hudctl.lua" },
-  { "ocui/apps/tube.lua",          "/lib/ocui/apps/tube.lua" },
   { "ocui/services/crafting.lua",  "/lib/ocui/services/crafting.lua" },
   { "ocui/services/energy.lua",    "/lib/ocui/services/energy.lua" },
   { "apps/ocpool.lua",             "/usr/bin/ocpool.lua" },
   { "apps/hud.lua",                "/usr/bin/hud.lua" },
   { "apps/hudctl.lua",             "/usr/bin/hudctl.lua" },
-  { "apps/tube.lua",               "/usr/bin/tube.lua" },
   { "apps/ae2_dashboard.lua",      "/usr/bin/ae2_dashboard.lua" },
 }
 
@@ -51,6 +48,11 @@ local FILES = {
 -- They don't shadow the new programs (PATH is /bin:/usr/bin:/home/bin:.,
 -- so /usr/bin wins), but they are outdated and only cause confusion.
 local OLD_COPIES = { "/home/hud.lua", "/home/ae2_dashboard.lua", "/home/ocpool.lua" }
+
+-- Files earlier ocui versions installed that no longer exist (the `tube`
+-- video player). Removed so the old program can't be run against the new
+-- library; settings in /etc/ocui are left alone.
+local OBSOLETE = { "/usr/bin/tube.lua", "/lib/ocui/apps/tube.lua", "/lib/ocui/tubeproto.lua" }
 
 local function fail(msg)
   io.stderr:write("install: " .. msg .. "\n")
@@ -115,6 +117,13 @@ end
 for name in pairs(package.loaded) do
   if name == "ocui" or name:match("^ocui%.") then
     package.loaded[name] = nil
+  end
+end
+
+for _, path in ipairs(OBSOLETE) do
+  if filesystem.exists(path) then
+    filesystem.remove(path)
+    print("ocui: removed obsolete " .. path)
   end
 end
 
