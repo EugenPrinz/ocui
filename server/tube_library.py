@@ -11,7 +11,9 @@ videos.txt, one video per line (# starts a comment):
 
   name    what you type in game: tube <name>   (letters, digits, - and _)
   fps     1..20; lower = sharper picture, choppier motion
-  source  YouTube/any yt-dlp URL, a direct link to a video file, or demo
+  source  YouTube/any yt-dlp URL, a direct link to a video file, or demo;
+          several separated by " | " are tried in order until one works
+          (YouTube often refuses GitHub's servers, so put a mirror first)
 
     python tube_library.py sync videos.txt     # convert new/changed, delete removed
     python tube_library.py plan videos.txt     # only print what sync would do
@@ -59,6 +61,11 @@ def parse_playlist(text):
             continue
         entries[name] = {"fps": int(fps), "source": source.strip()}
     return entries, errors
+
+
+def alternatives(source):
+    """'a | b' -> ['a', 'b'] (URLs never contain ' | ')."""
+    return [s.strip() for s in source.split(" | ") if s.strip()]
 
 
 def plan(playlist, manifest, assets):
@@ -156,19 +163,29 @@ def sync(playlist_path, dry_run=False):
             report.append(f"- would convert `{name}` at {entry['fps']} fps from {entry['source']}")
             continue
         out = f"{name}.octv"
-        try:
-            frames = tube_server.convert(entry["source"], out, entry["fps"], 160, 50,
-                                         tube_server.auto_budget(entry["fps"]), MAX_SECONDS, None)
-            gh("release", "upload", RELEASE, out, "--clobber")
-            size = os.path.getsize(out)
-            manifest[name] = {"source": entry["source"], "fps": entry["fps"],
-                              "seconds": round(frames / entry["fps"]), "bytes": size}
-            report.append(f"- converted `{name}`: {frames / entry['fps']:.0f} s, "
-                          f"{size / 1048576:.2f} MB -- in game: `tube {name}`")
-        except Exception as e:  # noqa: BLE001 -- keep going with the other videos
+        frames, used, attempts = None, None, []
+        for src in alternatives(entry["source"]):
+            try:
+                frames = tube_server.convert(src, out, entry["fps"], 160, 50,
+                                             tube_server.auto_budget(entry["fps"]), MAX_SECONDS, None)
+                used = src
+                break
+            except Exception as e:  # noqa: BLE001 -- try the next source
+                attempts.append(f"{src}: {e}")
+                print(f"::warning::{name}: {src}: {e}")
+        if frames is None:
             failed.append(name)
-            report.append(f"- **FAILED** `{name}`: {e}")
-            print(f"::error::{name}: {e}")
+            report.append(f"- **FAILED** `{name}`: " + " || ".join(attempts))
+            print(f"::error::{name}: every source failed")
+            continue
+        gh("release", "upload", RELEASE, out, "--clobber")
+        size = os.path.getsize(out)
+        manifest[name] = {"source": entry["source"], "used": used, "fps": entry["fps"],
+                          "seconds": round(frames / entry["fps"]), "bytes": size}
+        report.append(f"- converted `{name}` from {used}: {frames / entry['fps']:.0f} s, "
+                      f"{size / 1048576:.2f} MB -- in game: `tube {name}`")
+        for a in attempts:
+            report.append(f"  - skipped {a}")
     for name in keep:
         report.append(f"- unchanged `{name}`")
     if not dry_run:
