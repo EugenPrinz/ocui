@@ -16,6 +16,7 @@ component API used was checked against those exact source tags.
 |---|---|---|
 | `hud` | On AR glasses: LSC charge %, stored/capacity, avg IN/OUT, a scrolling net-flow graph (green = charging, red = draining), time to full/empty, maintenance & wireless flags; below it the busy AE2 crafting CPUs with progress bar, % and ETA | Glasses Terminal + linked AR Glasses; Adapter on the LSC controller; Adapter on an ME Interface/Controller |
 | `dashboard` | On a screen: one panel per crafting CPU with output, progress %, ETA | T2+ GPU and screen; Adapter on an ME Interface/Controller |
+| `tube` | On a screen: video player (picture only) for frames streamed by `server/tube_server.py` — YouTube via yt-dlp, local files, or a built-in demo | Internet Card, T3 GPU + screen, the server on a PC (see below) |
 | `hudctl` | On a screen: control panel for the HUD (show/hide panels and parts, anchor + offset per panel, width, text size, to-scale preview) and an **Energy** tab: live LSC numbers, net-flow and charge charts over 2 min / 1 h / 24 h, avg/min/max, EU in/out | T2+ GPU and screen (80x25+); an LSC for the Energy tab |
 
 The HUD and the dashboard get their data from shared **services**
@@ -118,6 +119,7 @@ ocui/                 the library — copy this whole folder to /lib/ocui
   theme.lua             screen: default palette
   app.lua               screen: double-buffered UI mounted into a pool
   hud.lua               glasses: Surface, Rect, Text, Bar, Graph, Group, anchors
+  tubeproto.lua         tube stream decoder + frame painter
   ae2.lua               data: crafting CPU tracker (progress + ETA)
   lsc.lua               data: Lapotronic Supercapacitor reader
   services/
@@ -126,15 +128,20 @@ ocui/                 the library — copy this whole folder to /lib/ocui
   apps/
     hud.lua             app: glasses HUD (LSC + autocraft)
     hudctl.lua          app: HUD control panel + energy charts
+    tube.lua            app: video player
     dashboard.lua       app: screen dashboard of crafting CPUs
 
 apps/                  programs — copy to /home or /usr/bin
   ocpool.lua            the launcher/controller
   hud.lua               shortcut: hud alone
   hudctl.lua            shortcut: control panel (+ hud, or the background one)
+  tube.lua              shortcut: tube <source> [host:port]
   ae2_dashboard.lua     shortcut: dashboard alone
 
 install.lua            in-game installer/updater (Internet Card)
+
+server/
+  tube_server.py        PC-side video transcoder/streamer for `tube`
 
 mock/                  local test harness — never deployed in-game
   component_factory.lua  fake OpenOS (component/computer/event, gpu,
@@ -173,6 +180,71 @@ Then:
    **AR Glasses** to it (shift-right-click the terminal) and wear them.
 2. Run `hudctl` (panel + HUD), or `ocpool hud dashboard`, or
    `ocpool -b hud` to keep the shell free.
+
+## Video player: `tube`
+
+Picture only, no sound: a fun experiment, not a real video player. Expect
+a chunky 160x100 picture in 256 colors at ~5–8 fps.
+
+**How it works.** OpenComputers can't decode video, so
+`server/tube_server.py` runs on a PC:
+
+1. It decodes the video with yt-dlp + ffmpeg (or generates the built-in
+   demo) and scales it to 160x100 pixels.
+2. It packs two pixels into each character cell: an upper half block
+   `▀`, whose foreground is the top pixel and background the bottom one.
+3. It maps the colors onto the exact palette of a tier 3 screen.
+4. It streams only the changed cells.
+
+An Internet Card reads at most 2048 bytes per server tick (~40 KB/s), so
+the player gives the server a byte budget per frame. The server then
+sends the most visible changes first and the rest a few frames later:
+fast motion smears instead of stalling. The player applies changes in a
+VRAM buffer, where drawing costs no call budget, and pushes the picture
+to the screen once per frame.
+
+**Setup on the PC** (once):
+
+```bash
+pip install yt-dlp
+winget install Gyan.FFmpeg
+python server/tube_server.py
+```
+
+`ffmpeg` and `yt-dlp` are only needed for videos. `tube demo` works with
+just Python. The server listens on `127.0.0.1:4123`; use `--host 0.0.0.0`
+to serve other machines and `--media <dir>` to set where local files are
+played from (requests can't leave that directory).
+
+**Allow the connection (single-player).** OpenComputers blocks private
+addresses, including your own PC, by default. In
+`config/OpenComputers.cfg`, in `filteringRules`, add a line **before**
+`"deny private"`:
+
+```
+"allow ip:127.0.0.1",
+```
+
+then restart the game.
+
+**In game** (Internet Card + T3 GPU and screen):
+
+```
+tube demo
+tube https://www.youtube.com/watch?v=...
+tube clip.mp4
+tube <source> 192.168.1.5:4123
+```
+
+The third form plays a file from the server's `--media` directory; the
+last uses a server other than the one in `/etc/ocui/tube.cfg`. Touch the
+screen to pause, `q` to quit. `/etc/ocui/tube.cfg` holds the default
+`host`, `port` and `source`, plus `fps`, `cols`/`rows` (0 = full screen)
+and `budget` (0 = derived from fps). Lower fps gives more bytes per
+frame, so a sharper picture with less smearing.
+
+Downloading from YouTube with yt-dlp goes against YouTube's terms of
+service; use it for your own or permitted videos.
 
 ## How the numbers are obtained
 
@@ -233,6 +305,12 @@ tests cover:
   remote status/stop/start/quit;
 - config merge and sandboxing;
 - `ocpool list`/`status`, foreground and background runs.
+
+`tube` is covered end to end: `tube_server.py --selftest` runs, the Lua
+and Python palettes are compared, and a stream generated by the server is
+played through a fake Internet Card socket. Every cell on the screen must
+match what the server thinks the client shows, with and without a byte
+budget. Refused connections, timeouts and pause are covered as well.
 
 OpenOS threads are faked: the "detached" pool runs synchronously until a
 scripted `quit`.

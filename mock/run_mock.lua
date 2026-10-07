@@ -910,6 +910,125 @@ do
   check(cfg and cfg.lsc.showGraph == false and cfg.lsc.x == 16, "both edits saved to hud.cfg")
 end
 
+-- ================================================================ tube ==
+
+local function python(args)
+  local p = io.popen('python "' .. projectRoot .. '/server/tube_server.py" ' .. args .. " 2>&1")
+  if not p then return nil end
+  local out = p:read("a")
+  p:close()
+  return out
+end
+
+local function readFile(path, mode)
+  local f = io.open(path, mode or "rb")
+  if not f then return nil end
+  local s = f:read("a")
+  f:close()
+  return s
+end
+
+section("tube: server selftest and palette parity")
+do
+  local out = python("--selftest")
+  check(out and out:find("selftest ok"), "tube_server.py --selftest: " .. tostring(out))
+  install(factory.new({}))
+  local proto = require("ocui.tubeproto")
+  local pal = proto.palette()
+  local py = io.popen('python -c "import sys; sys.path.insert(0, r\'' .. projectRoot ..
+    '/server\'); import tube_server as t; print(\' \'.join(str(r*65536+g*256+b) for r,g,b in t.PALETTE))"')
+  local list = py and py:read("a") or ""
+  if py then py:close() end
+  local i, same = 0, true
+  for v in list:gmatch("%d+") do
+    if pal[i] ~= tonumber(v) then same = false end
+    i = i + 1
+  end
+  eq(i, 256, "python palette has 256 colors")
+  check(same, "Lua and Python palettes are identical")
+  eq(pal[16], 0x000000, "index 16 is black")
+  eq(pal[255], 0xFFFFFF, "index 255 is white")
+end
+
+-- Plays a synthetic stream from tube_server.py through the player and
+-- compares every cell with what the server believes the client shows.
+local function tubeEndToEnd(budget)
+  local cols, rows = 40, 12
+  local tmp = os.tmpname()
+  python(string.format("--dump-synthetic %q --frames 25 --cols %d --rows %d --fps 10 --budget %d",
+    tmp, cols, rows, budget))
+  local stream = readFile(tmp)
+  local cellsText = readFile(tmp .. ".cells", "r") or ""
+  os.remove(tmp)
+  os.remove(tmp .. ".cells")
+  check(stream and #stream > 100, "synthetic stream generated")
+  if not stream then return end
+
+  local env = factory.new({ maxW = cols, maxH = rows, maxPulls = 400,
+    internet = { stream = stream, idleEvery = 4 } })
+  install(env)
+  require("ocui.config").save("tube", { showStats = false, fps = 10 })
+  local ok, err = runApp("apps/tube.lua", env, "demo")
+  check(ok, "player ran: " .. tostring(err))
+
+  local sock = env.component.internet.sockets[1]
+  local req = sock and sock.written[1] or ""
+  check(req:find("^PLAY fps=10 cols=40 rows=12 budget=%d+ src=demo\n$"), "PLAY request: " .. req)
+
+  local pal = require("ocui.tubeproto").palette()
+  local expected = {}
+  for v in cellsText:gmatch("%d+") do expected[#expected + 1] = tonumber(v) end
+  eq(#expected, cols * rows, "expected cells read")
+  local mismatches = 0
+  for y = 1, rows - 1 do -- the last row carries the "end of video" status line
+    for x = 1, cols do
+      local fg, bg = env.gpu._lastCell(x, y)
+      local c = expected[(y - 1) * cols + x]
+      if fg ~= pal[math.floor(c / 256)] or bg ~= pal[c % 256] then mismatches = mismatches + 1 end
+    end
+  end
+  eq(mismatches, 0, "every cell matches the server's view (budget " .. budget .. ")")
+  local last = (env.gpu._lastFrame() or ""):match("[^\n]*$")
+  check(last:find("end of video"), "end-of-stream status shown")
+  return env
+end
+
+section("tube: end to end, unlimited budget")
+tubeEndToEnd(0)
+
+section("tube: end to end, 300-byte budget (progressive updates)")
+tubeEndToEnd(300)
+
+section("tube: connection problems and pause")
+do
+  local env = factory.new({ maxW = 40, maxH = 12, maxPulls = 20, internet = { refuse = true } })
+  local ok = runApp("apps/tube.lua", env, "demo")
+  check(ok, "refused connection doesn't crash the app")
+  check((env.gpu._lastFrame() or ""):find("cannot connect: address is not allowed"), "refusal explained")
+
+  env = factory.new({ maxW = 40, maxH = 12, maxPulls = 300, internet = { neverConnect = true } })
+  runApp("apps/tube.lua", env, "demo", "10.0.0.5:9000")
+  local frame = env.gpu._lastFrame() or ""
+  check(frame:find("timeout connecting to 10%.0%.0%.5:9000"), "connect timeout with host:port from the args")
+
+  -- touch to pause: needs a stream that is still playing at the touch
+  local tmp = os.tmpname()
+  python(string.format("--dump-synthetic %q --frames 200 --cols 40 --rows 12 --fps 10", tmp))
+  local stream = readFile(tmp) or ""
+  os.remove(tmp)
+  os.remove(tmp .. ".cells")
+  local events = {}
+  for i = 1, 6 do events[i] = false end
+  events[7] = { "touch", "screen-1", 5, 5, 0, "player" }
+  env = factory.new({ maxW = 40, maxH = 12, maxPulls = 12, events = events,
+    internet = { stream = stream } })
+  install(env)
+  runApp("apps/tube.lua", env, "demo")
+  local sock = env.component.internet.sockets[1]
+  check(sock and sock.written[2] == "PAUSE\n", "touch sent PAUSE")
+  check(sock and sock.closed, "socket closed on quit")
+end
+
 -- ============================================================= install ==
 
 section("install.lua")
@@ -919,7 +1038,7 @@ do
   f:close()
   local listed = {}
   for path in source:gmatch('{ "([^"]+)",') do listed[path] = true end
-  local git = io.popen('git -C "' .. projectRoot .. '" ls-files ocui apps')
+  local git = io.popen('git -C "' .. projectRoot .. '" ls-files --cached --others --exclude-standard ocui apps')
   local seen = 0
   if git then
     for line in git:lines() do
