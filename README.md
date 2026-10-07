@@ -218,18 +218,18 @@ tube https://.../video.octv     # any URL
 ```
 
 `library` in `/etc/ocui/tube.cfg` defaults to the "videos" release of
-`EugenPrinz/ocui-videos`. Converting happens on GitHub's machines, from
-the browser:
+[`EugenPrinz/ocui-videos`](https://github.com/EugenPrinz/ocui-videos).
+That repository is kept separate from the code, so whatever lands in its
+release can't affect `ocui`. Converting runs on GitHub's machines:
 
-1. Create a public repository for videos (e.g. `ocui-videos`). Keep it
-   separate from the code: whatever lands in its release can't affect
-   `ocui`.
-2. Add the file `.github/workflows/tube.yml` with the contents of
-   [`server/tube-workflow.yml`](server/tube-workflow.yml).
-3. Go to Actions → "tube: convert a video" → Run workflow, and give it a
-   YouTube link (or a direct video file link), a name and the fps.
-4. In game: `tube <name>`. When you're done, run the workflow again with
-   `action = delete`.
+- `videos.txt` in that repo is the playlist, one `name fps source` per
+  line;
+- editing it, even right in the browser, triggers the workflow
+  ([`server/tube-workflow.yml`](server/tube-workflow.yml) +
+  [`server/tube_library.py`](server/tube_library.py));
+- the workflow converts new or changed videos into the release and
+  removes deleted ones;
+- in game you then run `tube <name>`.
 
 YouTube sometimes refuses GitHub's servers ("Sign in to confirm you're
 not a bot"). A direct link to a video file always works.
