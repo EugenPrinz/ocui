@@ -1,101 +1,295 @@
 # ocui — GTNH OpenComputers UI toolkit
 
-A small, reusable UI primitives library for OpenComputers screens in GTNH
-(GPU + Container/Widget/Canvas, not a text terminal), plus a demo app that
-shows live AE2 autocraft progress on a crafting-CPU dashboard.
+UI toolkit for OpenComputers in GT New Horizons, with two front ends:
+
+- **screen** (GPU + monitor): Canvas / Widget / Container, double-buffered;
+- **HUD** (AR glasses via a Glasses Terminal): retained-mode Rect / Text /
+  Bar / Graph.
+
+Targets **GTNH 2.8.4** (GT5-Unofficial 5.09.51.482, OpenComputers
+1.11.20-GTNH, AE2 rv3-beta-695-GTNH, OCGlasses 1.6.1-GTNH); every
+component API used was checked against those exact source tags.
+
+## Apps
+
+| App (`ocpool` name) | Shows | Needs |
+|---|---|---|
+| `hud` | On AR glasses: LSC charge %, stored/capacity, avg IN/OUT, a scrolling net-flow graph (green = charging, red = draining), time to full/empty, maintenance & wireless flags; below it the busy AE2 crafting CPUs with progress bar, % and ETA | Glasses Terminal + linked AR Glasses; Adapter on the LSC controller; Adapter on an ME Interface/Controller |
+| `dashboard` | On a screen: one panel per crafting CPU with output, progress %, ETA | T2+ GPU and screen; Adapter on an ME Interface/Controller |
+| `hudctl` | On a screen: control panel for the HUD (show/hide panels and parts, anchor + offset per panel, width, text size, to-scale preview) and an **Energy** tab: live LSC numbers, net-flow and charge charts over 2 min / 1 h / 24 h, avg/min/max, EU in/out | T2+ GPU and screen (80x25+); an LSC for the Energy tab |
+
+The HUD and the dashboard get their data from shared **services**
+(`energy` for the LSC, `crafting` for AE2). Each service polls once, for
+every app that uses it, and keeps the energy history across app restarts.
+A hidden HUD panel doesn't use its service: switching off the autocraft
+panel stops AE2 polling, unless the dashboard still needs it.
+
+**Each crafting CPU needs a Crafting Monitor** for AE2 to report *what*
+it is crafting (`finalOutput()`); without one the CPU still shows progress
+and ETA, just labelled "no monitor".
+
+## Running several apps: `ocpool`
+
+```
+ocpool hud dashboard        run both in the foreground (q / Ctrl+C quits)
+ocpool -b hud               run in the background; the shell stays usable
+ocpool                      run `autostart` from /etc/ocui/ocpool.cfg (default: hud)
+ocpool list                 available apps
+ocpool status               background pool: state, uptime, restarts, errors
+ocpool stop|start|restart hud
+ocpool quit                 stop the background pool
+ocpool log                  /tmp/ocpool.log (crash tracebacks end up here)
+```
+
+`hud`, `ae2_dashboard` and `hudctl` work as single-command shortcuts.
+`hudctl` runs the HUD alongside itself, or, if a background pool is
+already running (`ocpool -b hud`), controls the HUD in that pool.
+
+How it behaves:
+
+- **One cooperative loop, not threads.** OpenComputers runs one Lua state
+  per computer and every non-direct component call (each AE2 call)
+  freezes the whole computer until the next server tick, so real
+  parallelism isn't possible. Apps run as coroutine tasks that hand over
+  control at `ctx.yield()`/`ctx.sleep()`. The AE2 poll yields between
+  CPUs, so a long poll doesn't hold up the LSC samples.
+- **Crash isolation.** An error in one app tears down only that app (its
+  cleanup restores the screen/HUD) and restarts it after `restartDelay`
+  seconds, at most `maxRestarts` times. The count resets once the app has
+  run for 5 minutes. Other apps keep running.
+- **Exclusive resources.** Apps claim their GPU, screen and glasses
+  terminals; a second app wanting the same one fails with "in use by …".
+  Two screen apps need two GPU + screen pairs (set `gpu`/`screen` in
+  their config); touches go to the app on the touched screen.
+- **Background mode** (`-b`) runs the pool in a detached OpenOS thread.
+  There 'q' and Ctrl+C belong to the shell and are ignored, and an app
+  may not take the shell's screen. Put `ocpool -b` in `/home/.shrc` to
+  start your apps on boot.
+
+## Configuration
+
+Each app reads `/etc/ocui/<app>.cfg` (a Lua table), created with the
+defaults on first run. Edit it, then `ocpool restart <app>`. Your file is
+merged over the defaults, so new options from an update appear without
+losing your edits. A broken file stops only that app, and the error names
+the file.
+
+- `hud.cfg` (easiest via `hudctl`):
+  - `width`, `alpha`, `textScale`;
+  - `screen` — the player's GUI size; learned automatically when the
+    glasses are put on;
+  - `lsc.*` — `enabled`, `anchor` (top-left / top-right / bottom-left /
+    bottom-right), `x`/`y` offset from that corner, `showFlow`,
+    `showGraph`, `graphWindow` (2m / 1h / 24h), `graphBars`,
+    `graphHeight`;
+  - `crafting.*` — `enabled`, `stack` (sit right under the LSC panel),
+    `anchor`, `x`, `y`, `maxRows`;
+  - `colors.*`.
+- `energy.cfg`: `address` (which gt_machine is the LSC), `interval`,
+  `wirelessMax`.
+- `crafting.cfg`: `interval` (each poll costs 1 + 3 x busy CPUs ticks).
+- `dashboard.cfg`, `hudctl.cfg`: `gpu`, `screen`.
+- `ocpool.cfg`: `autostart`, `restartDelay`, `maxRestarts`.
+
+Positions are GUI pixels and depend on the player's window size and GUI
+Scale. Anchoring a panel to the corner it lives in keeps it there when
+those change. OCGlasses only reports the size when the glasses are put
+on, so after resizing the window, take the glasses off and on again.
+
+> Upgrading: older `hud.cfg` files (a single `x`/`y` for the whole HUD,
+> intervals inside `lsc`/`crafting`) are converted automatically on the
+> first start. The old `x`/`y` becomes the LSC panel's offset, and the
+> intervals now live in `energy.cfg` and `crafting.cfg`.
 
 ## Layout
 
 ```
-ocui/                 the reusable library — copy this whole folder as-is
-  util.lua              UTF-8-safe string length/truncate (no Lua 5.3 dep)
-  canvas.lua            GPU wrapper: origin + clip-rect, draw primitives
-  widget.lua            Widget base class, Container (generic layout)
-  widgets.lua           Label, ProgressBar, Panel, VStack
-  theme.lua             default color palette
-  ae2.lua               AE2 <-> OC data source (crafting CPU polling)
-  app.lua               double-buffered draw/event loop
+ocui/                 the library — copy this whole folder to /lib/ocui
+  loop.lua              cooperative scheduler + event dispatch
+  pool.lua              apps + shared services, crash isolation, resources
+  config.lua            /etc/ocui/<app>.cfg load/merge/serialize
+  storage.lua           file I/O facade (swappable for tests)
+  util.lua              UTF-8-safe len/truncate (works on OC's Lua 5.2)
+  format.lua            SI numbers, durations, bytes (safe for huge floats)
+  canvas.lua            screen: GPU wrapper with nested clipping
+  widget.lua            screen: Widget, Container
+  widgets.lua           screen: Label, ProgressBar, Panel, VStack, Button,
+                        Toggle, Cycle, Stepper, Tabs, Chart (half-block)
+  theme.lua             screen: default palette
+  app.lua               screen: double-buffered UI mounted into a pool
+  hud.lua               glasses: Surface, Rect, Text, Bar, Graph, Group, anchors
+  ae2.lua               data: crafting CPU tracker (progress + ETA)
+  lsc.lua               data: Lapotronic Supercapacitor reader
+  services/
+    energy.lua          LSC sampler + 2m/1h/24h history
+    crafting.lua        AE2 crafting CPU poller
+  apps/
+    hud.lua             app: glasses HUD (LSC + autocraft)
+    hudctl.lua          app: HUD control panel + energy charts
+    dashboard.lua       app: screen dashboard of crafting CPUs
 
-apps/
-  ae2_dashboard.lua    the demo app — one panel per crafting CPU
+apps/                  programs — copy to /home or /usr/bin
+  ocpool.lua            the launcher/controller
+  hud.lua               shortcut: hud alone
+  hudctl.lua            shortcut: control panel (+ hud, or the background one)
+  ae2_dashboard.lua     shortcut: dashboard alone
 
-mock/                  local dev/test harness, never deployed in-game
-  component_factory.lua  fake component/gpu/me_interface
-  run_mock.lua            multi-scenario smoke test (plain `lua` interpreter)
+mock/                  local test harness — never deployed in-game
+  component_factory.lua  fake OpenOS (component/computer/event, gpu,
+                         me_interface, LSC, glasses, threads, files, clock)
+  run_mock.lua           unit tests + app/pool/CLI scenarios with assertions
 ```
 
 ## Deploying in-game
 
-1. Requirements: a Tier 2+ GPU bound to a screen (Tier 2 minimum for
-   24-bit color; the demo was tuned against a Tier 3 screen), and an
-   **Adapter** placed adjacent to an **ME Interface** or **ME Controller**
-   so the computer can see `component.me_interface` / `.me_controller`.
-2. Copy the `ocui/` folder to `/lib/ocui` on the OC computer (via a floppy,
-   `pastebin`/an HTTP card + `wget`, or any file transfer you already use).
-3. Copy `apps/ae2_dashboard.lua` anywhere, e.g. `/home/ae2_dashboard.lua`.
-4. Run it: `ae2_dashboard` (or `ae2_dashboard.lua` depending on your
-   working directory). Press `q` to quit; it also exits cleanly on
-   Ctrl+Alt+C.
+1. Copy `ocui/` (including `ocui/apps/`) to `/lib/ocui` on the OC
+   computer (floppy, Internet Card + `wget`, …).
+2. Copy `apps/*.lua` to `/home` (or `/usr/bin` to run them from anywhere).
+3. For the HUD: connect a **Glasses Terminal** to the computer, link the
+   **AR Glasses** to it (shift-right-click the terminal) and wear them.
+4. Run `ocpool hud dashboard` (or `ocpool -b hud`), then adjust
+   `/etc/ocui/*.cfg` and `ocpool restart <app>`.
 
-The screen refreshes every 2 seconds (`tickInterval` in
-`apps/ae2_dashboard.lua`) and re-reads `getCpus()` each time.
+## How the numbers are obtained
+
+**Crafting progress.** AE2 exposes no "% done", and a job's final output
+goes straight into the network as it is produced, so it can't be counted
+in the CPU. `ocui/ae2.lua` tracks each job's *remaining work* —
+`sum(pendingItems) + sum(activeItems)`, which only shrinks while a job runs
+— against the largest value seen for that job:
+`progress = 1 - remaining/baseline`, `ETA = remaining / observed rate`.
+A job that was already running when the program started is measured from
+the moment it was first seen. Progress is in item units, not time, so it
+can move unevenly through a recipe tree. Each AE2 call costs one server
+tick, so a poll costs `1 + 3 × busy CPUs` ticks — keep `interval` in
+`/etc/ocui/crafting.cfg` at 2–3 s or more with many CPUs.
+
+**LSC.** `getStoredEUString()`/`getEUCapacityString()` give exact values
+(no Long clamping). Average IN/OUT, maintenance and wireless mode come from
+`getSensorInformation()`. In 2.8.4 those lines are translated on the
+server — in single-player, into *your* client language — so they're read
+by line position (10/11 avg IN/OUT, 17 maintenance, 18 wireless mode, 23
+wireless EU) and by Minecraft color code (§a ok/enabled, §c
+problem/disabled), never by English text, and numbers are parsed with any
+locale's thousands separators (`,`, NBSP, …). If a future pack shifts the
+lines, adjust `ocui/lsc.lua`'s `DEFAULT_SENSOR_LINES`. Without sensor data
+the net flow falls back to the change in stored EU, computed with exact
+decimal-string subtraction (floats can't resolve per-second deltas on
+20+ digit totals). In wireless mode the bar shows wireless EU against
+`lsc.wirelessMax`.
+
+**HUD cost.** Widget setters on the glasses are executed directly (no
+server-tick sync), but each one sends a packet to every linked player, so
+`ocui/hud.lua` caches every property and only sends real changes. A
+60-bar graph sampled every second is ~100–200 small packets/s while the
+values move.
 
 ## Testing without Minecraft
-
-`mock/run_mock.lua` fakes just enough of `component`/`event`/the AE2
-component surface to run the real `ocui` + `ae2_dashboard.lua` code under
-a plain Lua interpreter and print the rendered screen as ASCII art. It
-caught three real bugs during development (byte-vs-codepoint truncation
-of box-drawing borders, a container not stretching children to fill
-width, and clip regions not propagating through nested containers), so
-it's worth running again after any change to `ocui/`:
 
 ```bash
 lua mock/run_mock.lua
 ```
 
-It is **not** a faithful OpenComputers emulator — no power/tick budget
-simulation, no real font, no real AE2 semantics beyond the shapes
-documented in `ocui/ae2.lua`. It only proves the Lua runs and the layout
-math is self-consistent; final verification still has to happen in-game.
+Needs Lua 5.3+ on the PC (the fake GPU uses the `utf8` library; the
+deployed `ocui/` code doesn't). `-v` prints every rendered screen frame and
+an ASCII raster of the HUD. The suite has unit tests (sensor-line parsing in
+English and Russian, exact big-number diff, formatting, the crafting
+tracker on a virtual clock) and scenario runs of both apps: progress
+moving over time, missing Crafting Monitor, empty/erroring ME network, tiny
+screen with Cyrillic text, GPU without VRAM, input events not causing extra
+AE2 polls, wireless + maintenance flags, sensor-less LSC, missing
+components, cleanup of every glasses terminal on exit. Pool and launcher
+tests cover:
 
-## Writing your own screen with ocui
+- cooperative interleaving and periodic tasks that never overlap;
+- crash isolation with limited restarts, and a failed start not blocking
+  other apps;
+- resource conflicts, and two screens with touch routing;
+- background mode: 'q'/Ctrl+C ignored, the shell's screen refused,
+  remote status/stop/start/quit;
+- config merge and sandboxing;
+- `ocpool list`/`status`, foreground and background runs.
+
+OpenOS threads are faked: the "detached" pool runs synchronously until a
+scripted `quit`.
+
+It is **not** an OpenComputers emulator: no call budgets, no real font
+metrics, no real AE2/GT behavior beyond the documented shapes. It proves
+the Lua runs and the layout and math are consistent; the final check is
+in-game.
+
+## Writing your own app
+
+An app is a module in `ocui/apps/<name>.lua`. `ocpool list` finds it
+automatically.
 
 ```lua
-local component = require("component")
-local App        = require("ocui.app")
-local widgets     = require("ocui.widgets")
-local theme        = require("ocui.theme")
+local hud = require("ocui.hud")
 
-local root = widgets.VStack.new({ gap = 1 })
-root:add(widgets.Panel.new({
-  h = 3, title = "Hello", borderColor = theme.border, bg = theme.panel,
-}):add(widgets.Label.new({ text = "Hi there", fg = theme.text })))
-
-App.new({ root = root, tickInterval = 1 }):start()
+return {
+  name = "clock",
+  description = "uptime on the glasses",
+  defaults = { x = 10, y = 200 },          -- becomes /etc/ocui/clock.cfg
+  start = function(ctx, cfg)
+    local component = require("component")
+    local glasses = hud.findGlasses(component)
+    for _, g in ipairs(glasses) do assert(ctx:claim("glasses:" .. g.address)) end
+    local surface = hud.newSurface(glasses)
+    local text = surface:text({ x = cfg.x, y = cfg.y })
+    ctx:onStop(function() surface:clear() end)  -- runs on stop, crash, quit
+    ctx:every(1, function()
+      text:setText(string.format("%.0f s", require("computer").uptime()))
+    end)
+  end,
+}
 ```
 
-Primitives available: `Label` (text, alignment), `ProgressBar` (0..1 value
-+ centered label), `Panel` (bordered box with title, auto-sized children),
-`VStack` (vertical stack, full-width children). A widget's `w` can be left
-nil to auto-fill its container's width; `h` must be given explicitly.
-Add new primitives by extending `ocui.widget`'s `Widget` (leaf) or
-`Container` (has children) — see `ocui/widgets.lua` for the pattern.
+The `ctx` API (full list in `ocui/pool.lua`):
+
+| Call | What it does |
+|---|---|
+| `ctx:every(s, fn)` / `ctx:spawn(fn)` | add a task |
+| `ctx:on(signal, fn)` | add a signal handler |
+| `ctx:onStop(fn)` | add a cleanup |
+| `ctx:claim(resource)` | take exclusive use of a GPU, screen or glasses terminal |
+| `ctx.sleep(s)` / `ctx.yield()` | hand over control inside a task |
+| `ctx:log(...)` | write to the pool log |
+| `ctx:stop()` | stop this app |
+
+Never call `os.sleep`/`event.pull` inside an app: they block every other
+app.
+
+Screen apps build a widget tree and mount it:
+
+```lua
+local App     = require("ocui.app")
+local widgets = require("ocui.widgets")
+
+-- inside start(ctx, cfg):
+local root = widgets.VStack.new({ gap = 1 })
+local panel = root:add(widgets.Panel.new({ h = 3, title = "Hello", bg = 0x16161D }))
+panel:add(widgets.Label.new({ text = "Hi there" }))
+App.new({ root = root, tickInterval = 1, onTick = update, gpu = cfg.gpu or nil }):mount(ctx)
+```
+
+Screen widgets: a widget's `w` may be left nil to fill its container;
+`h` is explicit. Extend `ocui.widget`'s `Widget` (leaf) or `Container`
+(has children); see `ocui/widgets.lua`. HUD elements are created once and
+mutated; call setters freely — unchanged values aren't re-sent.
 
 ## Known limitations
 
-- AE2/OC expose no real "% done" for a crafting job (see
-  [AE2#5220](https://github.com/AppliedEnergistics/Applied-Energistics-2/issues/5220)).
-  `ocui/ae2.lua` approximates progress as
-  `done / (done + pending + active)` for items matching the job's final
-  output — a reasonable proxy, not an authoritative percentage for deep
-  recipe trees.
-- `entry.cpu.finalOutput()` has broken across AE2 versions before (see
-  [GTNH#23718](https://github.com/GTNewHorizons/GT-New-Horizons-Modpack/issues/23718));
-  it's called through `pcall` so a regression degrades to "no active job"
-  instead of crashing the dashboard.
-- `Canvas:text` doesn't support left-edge clipping (drawing text that
-  starts before the visible region) — not needed by any of the bundled
-  widgets, but worth knowing if you build a horizontally-scrolling one.
-- No scrolling: if you have more crafting CPUs than fit on screen, later
-  panels are clipped off rather than becoming scrollable.
+- One app's long non-yielding work (or a slow component call) still
+  delays the others: the pool is cooperative, not preemptive.
+- HUD positions are in GUI pixels. The screen size is only reported when
+  the glasses are put on, not on window resize. All players linked to a
+  terminal see the same layout, placed for the last reported screen size.
+- Energy history is in memory: it survives app restarts but not a pool
+  restart or reboot. A `hudctl` reaching a HUD in a background pool keeps
+  its own history, starting when `hudctl` started.
+- HUD text width is estimated (Minecraft's font is proportional), so long
+  item names are truncated a little conservatively.
+- Screen dashboard has no scrolling: CPUs beyond the screen height are
+  clipped. The HUD shows `crafting.maxRows` busy CPUs and a `+N` count.
+- `Canvas:text` doesn't support left-edge clipping (not needed by the
+  bundled widgets).

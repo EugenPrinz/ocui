@@ -9,18 +9,25 @@
 -- bleeding into a sibling or the parent's border -- a widget can never
 -- draw outside the box its container gave it, no matter how deep the
 -- nesting.
+--
+-- A Canvas draws into whatever GPU buffer is currently active; the owner
+-- (ocui.app) selects the buffer once per frame. Every GPU call costs
+-- call budget in OC, so the canvas tree also shares a per-frame color
+-- cache and skips redundant setForeground/setBackground calls.
 
 local util = require("ocui.util")
 
 local Canvas = {}
 Canvas.__index = Canvas
 
-function Canvas.new(gpu, buffer, x, y, w, h, parentClipX, parentClipY, parentClipW, parentClipH)
+-- Creates a root canvas. Child canvases come from :sub(); the trailing
+-- parameters are internal to that.
+function Canvas.new(gpu, x, y, w, h, parentClipX, parentClipY, parentClipW, parentClipH, colors)
   x, y = x or 0, y or 0
   local self = setmetatable({
     gpu = gpu,
-    buffer = buffer or 0,
     x = x, y = y, w = w, h = h,
+    colors = colors or {},
   }, Canvas)
 
   if parentClipX == nil then
@@ -39,23 +46,27 @@ end
 
 -- Returns a child canvas offset by (x, y) in this canvas' local space,
 -- clipped to (w, h) intersected with this canvas' own accumulated clip.
+-- The child inherits `bg`: the color of the surface it sits on, used as
+-- the background for text drawn without an explicit one (an OC GPU
+-- otherwise paints text with whatever background was set last).
 function Canvas:sub(x, y, w, h)
-  return Canvas.new(self.gpu, self.buffer, self.x + x, self.y + y, w, h,
-    self.clipX, self.clipY, self.clipW, self.clipH)
+  local child = Canvas.new(self.gpu, self.x + x, self.y + y, w, h,
+    self.clipX, self.clipY, self.clipW, self.clipH, self.colors)
+  child.bg = self.bg
+  return child
 end
 
-local function withBuffer(self, fn)
-  local gpu = self.gpu
-  local prev = gpu.getActiveBuffer()
-  if prev ~= self.buffer then
-    gpu.setActiveBuffer(self.buffer)
+function Canvas:setForeground(color)
+  if color and self.colors.fg ~= color then
+    self.gpu.setForeground(color)
+    self.colors.fg = color
   end
-  local ok, err = pcall(fn)
-  if prev ~= self.buffer then
-    gpu.setActiveBuffer(prev)
-  end
-  if not ok then
-    error(err, 0)
+end
+
+function Canvas:setBackground(color)
+  if color and self.colors.bg ~= color then
+    self.gpu.setBackground(color)
+    self.colors.bg = color
   end
 end
 
@@ -78,10 +89,8 @@ end
 function Canvas:fillRect(x, y, w, h, bg, char)
   local col, row, cw, ch = self:clipToAbs(x, y, w, h)
   if not col then return end
-  withBuffer(self, function()
-    if bg then self.gpu.setBackground(bg) end
-    self.gpu.fill(col, row, cw, ch, char or " ")
-  end)
+  self:setBackground(bg)
+  self.gpu.fill(col, row, cw, ch, char or " ")
 end
 
 -- Left-edge clipping (drawing text that starts before the clip region) is
@@ -96,11 +105,25 @@ function Canvas:text(x, y, str, fg, bg)
   if maxCols <= 0 then return end
   if util.len(str) > maxCols then str = util.truncate(str, maxCols) end
   if #str == 0 then return end
-  withBuffer(self, function()
-    if fg then self.gpu.setForeground(fg) end
-    if bg then self.gpu.setBackground(bg) end
-    self.gpu.set(ax + 1, ay + 1, str)
-  end)
+  self:setForeground(fg)
+  self:setBackground(bg or self.bg)
+  self.gpu.set(ax + 1, ay + 1, str)
+end
+
+-- Draws `str` downwards from (x, y), one codepoint per row, in a single
+-- GPU call -- the cheap way to draw a chart column.
+function Canvas:vtext(x, y, str, fg, bg)
+  local ax, ay = self.x + x, self.y + y
+  if ax < self.clipX or ax >= self.clipX + self.clipW then return end
+  local chars = util.chars(str)
+  local first, last = 1, #chars
+  if ay < self.clipY then first = self.clipY - ay + 1 end
+  local maxRow = self.clipY + self.clipH - 1
+  if ay + last - 1 > maxRow then last = maxRow - ay + 1 end
+  if first > last then return end
+  self:setForeground(fg)
+  self:setBackground(bg or self.bg)
+  self.gpu.set(ax + 1, ay + first, table.concat(chars, "", first, last), true)
 end
 
 function Canvas:hline(x, y, w, color, char)

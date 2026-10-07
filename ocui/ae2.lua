@@ -1,94 +1,135 @@
 -- ocui.ae2
--- Data-source wrapper around the AE2 <-> OpenComputers "common network"
--- API (me_interface / me_controller components), normalized into plain
--- Lua tables so UI code never touches the raw component proxy.
+-- Data source for AE2 crafting CPUs via the OpenComputers "common network"
+-- API (me_interface / me_controller), normalized into plain Lua tables so
+-- UI code never touches the raw component proxy.
 --
--- API reference (verified against GTNewHorizons/OpenComputers source,
--- src/main/scala/li/cil/oc/integration/appeng/NetworkControl.scala):
+-- API (verified for GTNH 2.8.4 = OpenComputers 1.11.20-GTNH,
+-- li/cil/oc/integration/appeng/NetworkControl.scala):
 --   me.getCpus() -> array of {name, storage, coprocessors, busy, cpu}
---   entry.cpu.isBusy() / isActive() / cancel()
---   entry.cpu.finalOutput() -> item-stack table (label, name, size) or nil
---   entry.cpu.storedItems() / pendingItems() / activeItems() -> arrays of
---     item-stack tables {name, label, size, ...}
+--   entry.cpu.finalOutput()  -> item stack {name, label, size} or nil, err
+--                               (needs a Crafting Monitor in the CPU!)
+--   entry.cpu.pendingItems() -> stacks still scheduled to be crafted
+--   entry.cpu.activeItems()  -> stacks currently being crafted
+-- None of these are "direct" callbacks: every call costs one server tick
+-- (50 ms), so one poll costs 1 + 3 * <busy CPUs> ticks.
 --
--- Caveat: AE2/OC do not expose a real "% done" for a crafting job (see
--- github.com/AppliedEnergistics/Applied-Energistics-2 issue #5220, request
--- for craftingETA/craftingStackSize was never fully implemented upstream).
--- We approximate progress as
---   done / (done + pending + active)
--- counting only items matching the job's final output, which is a
--- reasonable proxy for "how much of the requested stack already exists"
--- but is not an authoritative percentage for multi-step recipe trees.
+-- Progress: AE2 exposes no "% done" for a job, and the final output is
+-- pushed straight into the network as it is produced (it never sits in
+-- the CPU's storage), so it can't be counted directly. Instead the tracker
+-- measures the job's *remaining work*:
+--   remaining = sum(pendingItems sizes) + sum(activeItems sizes)
+-- which only ever goes down while a job runs (a pushed pattern moves
+-- items from pending to active, finished crafts leave active). The
+-- largest value seen for the job is its baseline, and
+--   progress = 1 - remaining / baseline,   eta = remaining / observed rate
+-- Caveats: a job already running when the program starts is measured from
+-- the moment it was first seen; progress counts item units, not
+-- crafting time, so a step with many cheap items weighs more than one slow
+-- step.
 
 local M = {}
 
 -- Finds the first component of type "me_interface" or "me_controller".
--- Pass an explicit address if you have more than one and need a specific
--- one (e.g. via sides + component.get, or a saved address).
 function M.find(component)
   return component.me_interface or component.me_controller
 end
 
-local function sumMatching(list, name)
+local function sumSizes(list)
   local total = 0
+  if type(list) ~= "table" then return 0 end
   for _, item in ipairs(list) do
-    if item.name == name then
-      total = total + (item.size or 0)
-    end
+    total = total + (tonumber(item.size) or 0)
   end
   return total
 end
 
-local KILO = 1024
-local UNITS = { "B", "K", "M", "G", "T" }
-
-function M.formatBytes(n)
-  n = n or 0
-  local i = 1
-  while n >= KILO and i < #UNITS do
-    n = n / KILO
-    i = i + 1
-  end
-  if i == 1 then
-    return string.format("%d%s", n, UNITS[i])
-  end
-  return string.format("%.1f%s", n, UNITS[i])
+-- Calls a CPU method, returning nil instead of raising if the cluster went
+-- away mid-poll or the AE2 side errors (it has broken across versions).
+local function try(fn)
+  if fn == nil then return nil end
+  local ok, result = pcall(fn)
+  if ok then return result end
+  return nil
 end
 
--- Returns an array of jobs: {
---   name, coprocessors, storage, busy,
---   output = { label, size } or nil,
---   progress = 0..1,
+local Tracker = {}
+Tracker.__index = Tracker
+
+-- clock: function returning seconds (computer.uptime in OC).
+function M.newTracker(clock)
+  return setmetatable({ clock = clock, jobs = {} }, Tracker)
+end
+
+-- Polls every crafting CPU and returns an array (getCpus() order) of:
+-- {
+--   index, name, coprocessors, storage, busy,
+--   output    = { name, label, size } or nil (no Crafting Monitor / idle),
+--   remaining = work units left (nil when idle),
+--   progress  = 0..1 (1 when idle),
+--   eta       = seconds or nil (unknown until some progress is observed),
+--   elapsed   = seconds since the job was first seen (nil when idle),
 -- }
--- one entry per crafting CPU on the network, in getCpus() order.
-function M.getCraftingJobs(me)
-  local jobs = {}
-  local cpus = me.getCpus()
-  for _, entry in ipairs(cpus) do
+-- yield (optional): called after each busy CPU's three AE2 calls, e.g.
+-- ctx.yield, so other pool tasks can run in the middle of a long poll.
+function Tracker:poll(me, yield)
+  local seen = {}
+  local result = {}
+
+  for index, entry in ipairs(me.getCpus()) do
     local job = {
+      index = index,
       name = entry.name,
       coprocessors = entry.coprocessors,
       storage = entry.storage,
       busy = entry.busy,
-      output = nil,
-      progress = entry.busy and 0 or 1,
+      progress = 1,
     }
-    if entry.busy then
-      -- finalOutput (and the AE2 tile it reads from) has broken across AE2
-      -- versions before, hence the pcall guard.
-      local ok, final = pcall(entry.cpu.finalOutput)
-      if ok and final then
-        job.output = { label = final.label or final.name, size = final.size }
-        local done = sumMatching(entry.cpu.storedItems(), final.name)
-        local pending = sumMatching(entry.cpu.pendingItems(), final.name)
-        local active = sumMatching(entry.cpu.activeItems(), final.name)
-        local total = done + pending + active
-        job.progress = total > 0 and (done / total) or 0
+
+    if entry.busy and entry.cpu then
+      local final = try(entry.cpu.finalOutput)
+      if type(final) == "table" and final.name then
+        job.output = { name = final.name, label = final.label or final.name, size = final.size }
       end
+
+      local remaining = sumSizes(try(entry.cpu.pendingItems)) + sumSizes(try(entry.cpu.activeItems))
+      local now = self.clock() -- per CPU: the poll may yield between CPUs
+      local identity = job.output and job.output.name or "?"
+      local key = tostring(index) .. ":" .. tostring(entry.name)
+      local state = self.jobs[key]
+
+      -- Remaining work never grows within one job, so growth (or a new
+      -- output item) means the CPU has started a different job.
+      if state == nil or state.identity ~= identity or remaining > state.last then
+        state = { identity = identity, baseline = remaining, startedAt = now }
+      end
+      state.last = remaining
+      seen[key] = state
+
+      job.remaining = remaining
+      job.elapsed = now - state.startedAt
+      job.progress = state.baseline > 0 and (1 - remaining / state.baseline) or 0
+      local done = state.baseline - remaining
+      if done > 0 and job.elapsed > 0 then
+        job.eta = remaining * job.elapsed / done
+      end
+      if yield then yield() end
     end
-    table.insert(jobs, job)
+
+    table.insert(result, job)
   end
-  return jobs
+
+  -- CPUs that went idle (or disappeared) forget their job.
+  self.jobs = seen
+  return result
+end
+
+-- Convenience: only the busy CPUs from a poll, in CPU order.
+function M.busyOnly(jobs)
+  local out = {}
+  for _, job in ipairs(jobs) do
+    if job.busy then table.insert(out, job) end
+  end
+  return out
 end
 
 return M
