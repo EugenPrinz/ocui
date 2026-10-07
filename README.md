@@ -134,21 +134,45 @@ apps/                  programs — copy to /home or /usr/bin
   hudctl.lua            shortcut: control panel (+ hud, or the background one)
   ae2_dashboard.lua     shortcut: dashboard alone
 
+install.lua            in-game installer/updater (Internet Card)
+
 mock/                  local test harness — never deployed in-game
   component_factory.lua  fake OpenOS (component/computer/event, gpu,
                          me_interface, LSC, glasses, threads, files, clock)
   run_mock.lua           unit tests + app/pool/CLI scenarios with assertions
 ```
 
-## Deploying in-game
+## Installing / updating in-game
 
-1. Copy `ocui/` (including `ocui/apps/`) to `/lib/ocui` on the OC
-   computer (floppy, Internet Card + `wget`, …).
-2. Copy `apps/*.lua` to `/home` (or `/usr/bin` to run them from anywhere).
-3. For the HUD: connect a **Glasses Terminal** to the computer, link the
+With an **Internet Card** in the computer:
+
+```
+wget -f https://raw.githubusercontent.com/EugenPrinz/ocui/main/install.lua /tmp/install.lua
+/tmp/install.lua
+```
+
+The same two commands update an existing install. `install.lua`:
+
+- downloads every file first and writes nothing if any download fails,
+  so a dropped connection can't leave a mix of old and new versions;
+- puts the library into `/lib/ocui` and the programs into `/usr/bin`, so
+  `ocpool`, `hud`, `hudctl` and `ae2_dashboard` run from any directory;
+- clears the cached `ocui` modules from memory;
+- never touches your settings in `/etc/ocui`.
+
+`/tmp/install.lua <branch|tag|commit>` installs a specific version.
+GitHub's raw files can lag a push by a few minutes. If a background pool
+is running, restart it afterwards with `ocpool quit && ocpool -b`.
+
+Without an Internet Card, copy `ocui/` to `/lib/ocui` and `apps/*.lua` to
+`/usr/bin` by any other means (floppy, …).
+
+Then:
+
+1. For the HUD: connect a **Glasses Terminal** to the computer, link the
    **AR Glasses** to it (shift-right-click the terminal) and wear them.
-4. Run `ocpool hud dashboard` (or `ocpool -b hud`), then adjust
-   `/etc/ocui/*.cfg` and `ocpool restart <app>`.
+2. Run `hudctl` (panel + HUD), or `ocpool hud dashboard`, or
+   `ocpool -b hud` to keep the shell free.
 
 ## How the numbers are obtained
 

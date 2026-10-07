@@ -910,5 +910,83 @@ do
   check(cfg and cfg.lsc.showGraph == false and cfg.lsc.x == 16, "both edits saved to hud.cfg")
 end
 
+-- ============================================================= install ==
+
+section("install.lua")
+do
+  local f = io.open(projectRoot .. "/install.lua", "rb")
+  local source = f:read("a")
+  f:close()
+  local listed = {}
+  for path in source:gmatch('{ "([^"]+)",') do listed[path] = true end
+  local git = io.popen('git -C "' .. projectRoot .. '" ls-files ocui apps')
+  local seen = 0
+  if git then
+    for line in git:lines() do
+      seen = seen + 1
+      check(listed[line], "installer includes " .. line)
+    end
+    git:close()
+  end
+  check(seen > 0, "git ls-files listed the deployable files")
+
+  -- Runs install.lua against a fake internet serving this checkout;
+  -- downloading `failOn` raises like a 404 does in OpenOS.
+  local function runInstall(failOn)
+    local env = factory.new({})
+    local written = {}
+    local realOpen, realExit = io.open, os.exit
+    env.component.isAvailable = function(t) return t == "internet" end
+    env.filesystem.path = function(p) return p:match("^(.*)/[^/]*$") end
+    env.filesystem.makeDirectory = function() return true end
+    package.loaded.internet = {
+      request = function(url)
+        local rel = url:match("/main/(.+)$")
+        if rel == failOn then error("HTTP request failed: Not Found") end
+        local src = realOpen(projectRoot .. "/" .. rel, "rb")
+        local body = src:read("a")
+        src:close()
+        local done = false
+        return setmetatable({ response = function() return 200, "OK" end }, {
+          __call = function()
+            if done then return nil end
+            done = true
+            return body
+          end,
+        })
+      end,
+    }
+    io.open = function(path, mode)
+      if path:sub(1, 1) == "/" and mode == "w" then
+        written[path] = ""
+        return { write = function(_, s) written[path] = written[path] .. s end, close = function() end }
+      end
+      return realOpen(path, mode)
+    end
+    os.exit = function(code) error({ exitCode = code }, 0) end
+    local out, _, ok, err = captureOutput(function() return runApp("install.lua", env) end)
+    io.open, os.exit = realOpen, realExit
+    package.loaded.internet = nil
+    return written, out, ok, err
+  end
+
+  local written, out, ok, err = runInstall(nil)
+  check(ok, "install ran: " .. tostring(type(err) == "table" and err.exitCode or err))
+  local count = 0
+  for _ in pairs(written) do count = count + 1 end
+  eq(count, seen, "every file written")
+  local src = io.open(projectRoot .. "/ocui/pool.lua", "rb")
+  local poolSource = src:read("a")
+  src:close()
+  eq(written["/lib/ocui/pool.lua"], poolSource, "library file copied byte for byte")
+  check(written["/usr/bin/ocpool.lua"], "programs go to /usr/bin")
+  check(out:find("installed to /lib/ocui"), "success message")
+
+  local written2, out2, ok2, err2 = runInstall("ocui/hud.lua")
+  check(not ok2 and type(err2) == "table" and err2.exitCode == 1, "download failure exits 1")
+  check(next(written2) == nil, "nothing written when one download fails")
+  check(out2:find("nothing was changed"), "says nothing was changed")
+end
+
 print(string.format("\n%d passed, %d failed", passes, failures))
 if failures > 0 then os.exit(1) end
