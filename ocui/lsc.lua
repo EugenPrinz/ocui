@@ -101,11 +101,12 @@ function M.decimalDiff(a, b)
     end
     digits[i] = d
   end
-  local n = 0
-  for i = 1, #digits do
-    n = n * 10 + digits[i]
-  end
-  return sign * n
+  -- Convert the exact digits once: an exact integer when the result fits
+  -- in 64 bits, else the nearest double. (Accumulating `n * 10 + d` in an
+  -- integer silently wrapped past 9.2E18 on OC's Lua 5.3 architecture,
+  -- giving a random value of either sign; on Lua 5.2 every number is a
+  -- double, so it never showed up there.)
+  return sign * tonumber(table.concat(digits))
 end
 
 local function call(proxy, name)
