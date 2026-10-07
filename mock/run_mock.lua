@@ -813,6 +813,35 @@ end
 
 -- ============================================================== hudctl ==
 
+section("hud: graph bars on whole pixels")
+do
+  local env = factory.new({ glasses = 1 })
+  install(env)
+  local hud = require("ocui.hud")
+  local surface = hud.newSurface(env.glasses)
+  -- 182 px / 60 bars = 3.03 px per bar: fractional before the fix
+  local graph = hud.newGroup(surface, 3, 5):graph({ x = 4, y = 30, w = 182, h = 34, bars = 60 })
+  local vals = {}
+  for i = 1, 60 do vals[i] = (i % 7 - 3) * 1000 + 1 end
+  graph:setValues(vals)
+  local widths, fractional, shown = {}, 0, 0
+  for _, b in ipairs(graph.bars) do
+    local w = b.raws[1].s
+    if w.visible then
+      shown = shown + 1
+      widths[w.b] = true
+      for _, v in ipairs({ w.x, w.y, w.a, w.b }) do
+        if v ~= math.floor(v) then fractional = fractional + 1 end
+      end
+    end
+  end
+  eq(shown, 60, "every bar shown")
+  eq(fractional, 0, "no fractional bar position or size")
+  local n = 0
+  for _ in pairs(widths) do n = n + 1 end
+  eq(n, 1, "all bars equally wide")
+end
+
 section("hudctl: toggle, live move, energy tab")
 do
   local env

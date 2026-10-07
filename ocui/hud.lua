@@ -350,6 +350,8 @@ end
 
 M.ANCHORS = { "top-left", "top-right", "bottom-left", "bottom-right" }
 
+local function round(v) return math.floor(v + 0.5) end
+
 function Graph:render()
   local vals = self.values
   local maxPos, maxNeg = 0, 0
@@ -358,18 +360,23 @@ function Graph:render()
     if -v > maxNeg then maxNeg = -v end
   end
   local span = maxPos + maxNeg
+  -- Bars use whole GUI pixels only: with fractional widths and positions
+  -- the client rounds each bar differently, so equal bars come out 1 px
+  -- wider or narrower than their neighbours. The row is right-aligned and
+  -- the remainder (less than one step) stays empty on the left.
   local zeroY, scale
   if span == 0 then
-    zeroY = self.y + self.h
+    zeroY = round(self.y + self.h)
     scale = 0
   else
-    zeroY = self.y + self.h * maxPos / span
+    zeroY = round(self.y + self.h * maxPos / span)
     scale = self.h / span
   end
   self.axis:setPosition(self.x, zeroY - 0.25)
 
-  local barW = self.w / self.n
-  local gap = barW >= 3 and 1 or 0
+  local step = math.max(math.floor(self.w / self.n), 1)
+  local gap = step >= 3 and 1 or 0
+  local x0 = round(self.x + self.w) - self.n * step
   local offset = self.n - #vals -- right-align: newest value in the last slot
   for i = 1, self.n do
     local bar = self.bars[i]
@@ -377,8 +384,8 @@ function Graph:render()
     if v == nil or v == 0 or scale == 0 then
       bar:setVisible(false)
     else
-      local bh = math.max(math.abs(v) * scale, 0.5)
-      local bx = self.x + (i - 1) * barW
+      local bh = math.max(round(math.abs(v) * scale), 1)
+      local bx = x0 + (i - 1) * step
       if v > 0 then
         bar:setPosition(bx, zeroY - bh)
         bar:setColor(self.posColor)
@@ -386,7 +393,7 @@ function Graph:render()
         bar:setPosition(bx, zeroY)
         bar:setColor(self.negColor)
       end
-      bar:setSize(math.max(barW - gap, 0.5), bh)
+      bar:setSize(step - gap, bh)
       bar:setVisible(true)
     end
   end
