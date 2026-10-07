@@ -1,21 +1,30 @@
--- tube -- plays a video streamed by server/tube_server.py on this screen.
+-- tube -- plays a converted video on this screen (picture only).
 --
---   tube                          `source` from /etc/ocui/tube.cfg (default: demo)
---   tube demo                     built-in test animation (server needs no ffmpeg)
---   tube https://youtu.be/...     anything yt-dlp can fetch
---   tube clip.mp4                 a file in the server's --media directory
---   tube <source> 192.168.1.5:4123   another server than in tube.cfg
+--   tube                     `source` from /etc/ocui/tube.cfg (default: demo)
+--   tube <name>              <name>.octv from your video library (the "videos"
+--                            release of the GitHub repo, see the tube workflow)
+--   tube <https://.../x.octv>   a converted file from any URL
+--   tube live <source> [host:port]
+--                            real time from a tube_server.py you run yourself
 --
 -- Touch the screen to pause, q to quit.
 
 local args = { ... }
 local tube = require("ocui.apps.tube")
 
-tube.source = args[1]
-if args[2] then
-  local host, port = args[2]:match("^([^:]+):?(%d*)$")
-  tube.host = host
-  tube.port = tonumber(port)
+if args[1] == "live" then
+  if not args[2] then
+    io.stderr:write("usage: tube live <source> [host:port]\n")
+    return 1
+  end
+  local req = { mode = "live", source = args[2] }
+  if args[3] then
+    local host, port = args[3]:match("^([^:]+):?(%d*)$")
+    req.host, req.port = host, tonumber(port)
+  end
+  tube.request = req
+elseif args[1] then
+  tube.request = { mode = "file", source = args[1] }
 end
 
 require("ocui.pool").runSingle(tube)

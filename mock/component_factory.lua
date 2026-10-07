@@ -486,6 +486,37 @@ local function newInternet(def)
     function sock.close() sock.closed = true end
     return sock
   end
+
+  -- HTTP: def.http[url] = body string, or { code = 404 }
+  inet.requests = {}
+  function inet.request(url)
+    table.insert(inet.requests, url)
+    local entry = def.http and def.http[url]
+    local h = { reads = 0, pos = 1, closed = false }
+    local checks = 0
+    function h.finishConnect()
+      checks = checks + 1
+      return checks >= 2
+    end
+    function h.response()
+      if type(entry) == "string" then return 200, "OK", {} end
+      return (type(entry) == "table" and entry.code) or 404, "Not Found", {}
+    end
+    function h.read(n)
+      h.reads = h.reads + 1
+      n = math.min(n or 2048, 2048)
+      if type(entry) ~= "string" then return nil end
+      if def.idleEvery and h.reads % def.idleEvery == 0 then return "" end
+      if h.pos > #entry then return nil end
+      local size = math.min(n, 300 + (h.reads * 977) % 1749)
+      local chunk = entry:sub(h.pos, h.pos + size - 1)
+      h.pos = h.pos + #chunk
+      return chunk
+    end
+    function h.close() h.closed = true end
+    inet.lastHttp = h
+    return h
+  end
   return inet
 end
 

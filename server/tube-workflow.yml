@@ -1,0 +1,114 @@
+# Workflow for a SEPARATE videos repository (e.g. "ocui-videos"), not for
+# ocui itself: converted videos are published there, so whatever ends up
+# in that repo's release can never affect the ocui code repository.
+#
+# Setup (browser only):
+#   1. Create a public repository, e.g. ocui-videos.
+#   2. Add file -> Create new file -> .github/workflows/tube.yml, paste this.
+#   3. Actions -> "tube: convert a video" -> Run workflow.
+# In game:  tube <name>   (library in /etc/ocui/tube.cfg must point to
+#   https://github.com/<you>/<repo>/releases/download/videos/ )
+# Done watching: run it again with action = delete.
+#
+# Source: a YouTube (or any yt-dlp supported) link, a direct link to a video
+# file (.mp4/.webm/...), or "demo". YouTube sometimes refuses GitHub's
+# servers ("Sign in to confirm you're not a bot"); a direct file link always
+# works -- e.g. drag a video into an issue comment of this repo and use the
+# link it gets.
+
+name: "tube: convert a video"
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "convert = add/replace a video, delete = remove it"
+        type: choice
+        options: [convert, delete]
+        default: convert
+      source:
+        description: "Video: YouTube/any yt-dlp URL, direct link to a video file, or demo (ignored for delete)"
+        required: false
+        default: "demo"
+      name:
+        description: "Name to play it by in game (letters, digits, - and _): tube <name>"
+        required: true
+        default: "demo"
+      fps:
+        description: "Frames per second (lower = sharper picture, choppier motion)"
+        required: true
+        default: "6"
+      max_minutes:
+        description: "Cut the video after this many minutes"
+        required: true
+        default: "10"
+
+permissions:
+  contents: write # create/update the "videos" release
+
+jobs:
+  tube:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      ACTION: ${{ inputs.action }}
+      SOURCE: ${{ inputs.source }}
+      NAME: ${{ inputs.name }}
+      FPS: ${{ inputs.fps }}
+      MAX_MINUTES: ${{ inputs.max_minutes }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Check inputs
+        run: |
+          [[ "$NAME" =~ ^[A-Za-z0-9_-]{1,64}$ ]] || { echo "::error::name may only contain letters, digits, - and _"; exit 1; }
+          [[ "$FPS" =~ ^[0-9]+$ ]] && (( FPS >= 1 && FPS <= 20 )) || { echo "::error::fps must be 1..20"; exit 1; }
+          [[ "$MAX_MINUTES" =~ ^[0-9]+$ ]] && (( MAX_MINUTES >= 1 && MAX_MINUTES <= 60 )) || { echo "::error::max_minutes must be 1..60"; exit 1; }
+
+      - name: Delete
+        if: inputs.action == 'delete'
+        run: |
+          gh release delete-asset videos "$NAME.octv" --yes
+          echo "### Deleted \`$NAME\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Get the converter (ocui)
+        if: inputs.action == 'convert'
+        uses: actions/checkout@v4
+        with:
+          repository: EugenPrinz/ocui
+          path: ocui
+
+      - uses: actions/setup-python@v5
+        if: inputs.action == 'convert'
+        with:
+          python-version: "3.12"
+
+      - name: Install ffmpeg and yt-dlp
+        if: inputs.action == 'convert'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg
+          pip install --quiet --upgrade yt-dlp
+
+      - name: Convert
+        if: inputs.action == 'convert'
+        run: |
+          python ocui/server/tube_server.py --convert "$SOURCE" --out "$NAME.octv" \
+            --fps "$FPS" --max-seconds $(( MAX_MINUTES * 60 ))
+
+      - name: Publish to the "videos" release
+        if: inputs.action == 'convert'
+        run: |
+          if ! gh release view videos >/dev/null 2>&1; then
+            gh release create videos --title "tube videos" \
+              --notes "Videos converted for the ocui tube player. Play one in game with: tube <name>"
+          fi
+          gh release upload videos "$NAME.octv" --clobber
+          SIZE=$(du -h "$NAME.octv" | cut -f1)
+          {
+            echo "### Converted: \`$NAME\` ($SIZE)"
+            echo
+            echo "In game: \`tube $NAME\`"
+            echo
+            echo "Library URL for /etc/ocui/tube.cfg: https://github.com/$GH_REPO/releases/download/videos/"
+          } >> "$GITHUB_STEP_SUMMARY"

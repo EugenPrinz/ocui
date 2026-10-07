@@ -952,78 +952,119 @@ end
 
 -- Plays a synthetic stream from tube_server.py through the player and
 -- compares every cell with what the server believes the client shows.
-local function tubeEndToEnd(budget)
-  local cols, rows = 40, 12
+local LIBRARY = "https://github.com/EugenPrinz/ocui-videos/releases/download/videos/"
+
+-- The last frame as one line with whitespace collapsed, so phrases are
+-- found even when the status text wrapped across screen rows.
+local function screenText(env)
+  return ((env.gpu._lastFrame() or ""):gsub("%s+", " "))
+end
+
+local function synthetic(frames, cols, rows, fps, budget)
   local tmp = os.tmpname()
-  python(string.format("--dump-synthetic %q --frames 25 --cols %d --rows %d --fps 10 --budget %d",
-    tmp, cols, rows, budget))
+  python(string.format("--dump-synthetic %q --frames %d --cols %d --rows %d --fps %d --budget %d",
+    tmp, frames, cols, rows, fps, budget or 0))
   local stream = readFile(tmp)
   local cellsText = readFile(tmp .. ".cells", "r") or ""
   os.remove(tmp)
   os.remove(tmp .. ".cells")
-  check(stream and #stream > 100, "synthetic stream generated")
-  if not stream then return end
+  return stream, cellsText
+end
 
-  local env = factory.new({ maxW = cols, maxH = rows, maxPulls = 400,
-    internet = { stream = stream, idleEvery = 4 } })
-  install(env)
-  require("ocui.config").save("tube", { showStats = false, fps = 10 })
-  local ok, err = runApp("apps/tube.lua", env, "demo")
-  check(ok, "player ran: " .. tostring(err))
-
-  local sock = env.component.internet.sockets[1]
-  local req = sock and sock.written[1] or ""
-  check(req:find("^PLAY fps=10 cols=40 rows=12 budget=%d+ src=demo\n$"), "PLAY request: " .. req)
-
+-- Compares the last shown frame with the cells the server believes the
+-- client shows (the last row holds the end-of-stream status line).
+local function checkPicture(env, cellsText, cols, rows, what)
   local pal = require("ocui.tubeproto").palette()
   local expected = {}
   for v in cellsText:gmatch("%d+") do expected[#expected + 1] = tonumber(v) end
   eq(#expected, cols * rows, "expected cells read")
   local mismatches = 0
-  for y = 1, rows - 1 do -- the last row carries the "end of video" status line
+  for y = 1, rows - 1 do
     for x = 1, cols do
       local fg, bg = env.gpu._lastCell(x, y)
       local c = expected[(y - 1) * cols + x]
       if fg ~= pal[math.floor(c / 256)] or bg ~= pal[c % 256] then mismatches = mismatches + 1 end
     end
   end
-  eq(mismatches, 0, "every cell matches the server's view (budget " .. budget .. ")")
+  eq(mismatches, 0, "every cell matches the server's view (" .. what .. ")")
   local last = (env.gpu._lastFrame() or ""):match("[^\n]*$")
-  check(last:find("end of video"), "end-of-stream status shown")
-  return env
+  check(last:find("end of video"), "end-of-stream status shown (" .. what .. ")")
 end
 
-section("tube: end to end, unlimited budget")
-tubeEndToEnd(0)
+-- mode "live": tube live demo (TCP); mode "file": tube demo (HTTP library)
+local function tubeEndToEnd(mode, budget)
+  local cols, rows, frames, fps = 40, 12, 25, 10
+  local stream, cellsText = synthetic(frames, cols, rows, fps, budget)
+  check(stream and #stream > 100, "synthetic stream generated")
+  if not stream then return end
 
-section("tube: end to end, 300-byte budget (progressive updates)")
-tubeEndToEnd(300)
+  local internet = { idleEvery = 4 }
+  if mode == "live" then internet.stream = stream else internet.http = { [LIBRARY .. "demo.octv"] = stream } end
+  local env = factory.new({ maxW = cols, maxH = rows, maxPulls = 600, internet = internet })
+  install(env)
+  require("ocui.config").save("tube", { showStats = false, fps = fps })
+  local ok, err
+  if mode == "live" then
+    ok, err = runApp("apps/tube.lua", env, "live", "demo")
+    local sock = env.component.internet.sockets[1]
+    local req = sock and sock.written[1] or ""
+    check(req:find("^PLAY fps=10 cols=40 rows=12 budget=%d+ src=demo\n$"), "PLAY request: " .. req)
+  else
+    ok, err = runApp("apps/tube.lua", env, "demo")
+    eq(env.component.internet.requests[1], LIBRARY .. "demo.octv", "fetched from the video library")
+    -- the player paces frames itself: 25 frames at 10 fps take >= 2.4 s
+    local elapsed = env.clock() - 1000
+    check(elapsed >= (frames - 1) / fps, string.format("frames paced to the video's fps (%.1f s)", elapsed))
+  end
+  check(ok, "player ran: " .. tostring(err))
+  checkPicture(env, cellsText, cols, rows, mode .. ", budget " .. budget)
+end
 
-section("tube: connection problems and pause")
+section("tube: live (TCP), unlimited budget")
+tubeEndToEnd("live", 0)
+
+section("tube: live (TCP), 300-byte budget (progressive updates)")
+tubeEndToEnd("live", 300)
+
+section("tube: file over HTTP from the video library")
+tubeEndToEnd("file", 300)
+
+section("tube: file mode errors")
+do
+  local env = factory.new({ maxW = 40, maxH = 12, maxPulls = 30, internet = { http = {} } })
+  runApp("apps/tube.lua", env, "nosuchvideo")
+  local text = screenText(env)
+  check(text:find("not found %(convert it first%)"), "missing video reported with a hint: " .. text)
+  check(text:find("nosuchvid"), "names what was requested")
+
+  local stream = synthetic(5, 50, 12, 10, 0)
+  local url = "https://example.com/big.octv"
+  env = factory.new({ maxW = 40, maxH = 12, maxPulls = 30, internet = { http = { [url] = stream } } })
+  runApp("apps/tube.lua", env, url)
+  eq(env.component.internet.requests[1], url, "full URL used as is")
+  check(screenText(env):find("video is 50x12, this screen only 40x12"), "too-wide video explained")
+end
+
+section("tube: live connection problems and pause")
 do
   local env = factory.new({ maxW = 40, maxH = 12, maxPulls = 20, internet = { refuse = true } })
-  local ok = runApp("apps/tube.lua", env, "demo")
+  local ok = runApp("apps/tube.lua", env, "live", "demo")
   check(ok, "refused connection doesn't crash the app")
-  check((env.gpu._lastFrame() or ""):find("cannot connect: address is not allowed"), "refusal explained")
+  check(screenText(env):find("address is not allowed"), "refusal explained: " .. screenText(env))
 
-  env = factory.new({ maxW = 40, maxH = 12, maxPulls = 300, internet = { neverConnect = true } })
-  runApp("apps/tube.lua", env, "demo", "10.0.0.5:9000")
-  local frame = env.gpu._lastFrame() or ""
-  check(frame:find("timeout connecting to 10%.0%.0%.5:9000"), "connect timeout with host:port from the args")
+  env = factory.new({ maxW = 40, maxH = 12, maxPulls = 400, internet = { neverConnect = true } })
+  runApp("apps/tube.lua", env, "live", "demo", "10.0.0.5:9000")
+  check(screenText(env):find("timeout connecting to 10%.0%.0%.5:9000"), "connect timeout with host:port from the args")
 
   -- touch to pause: needs a stream that is still playing at the touch
-  local tmp = os.tmpname()
-  python(string.format("--dump-synthetic %q --frames 200 --cols 40 --rows 12 --fps 10", tmp))
-  local stream = readFile(tmp) or ""
-  os.remove(tmp)
-  os.remove(tmp .. ".cells")
+  local stream = synthetic(200, 40, 12, 10, 0) or ""
   local events = {}
   for i = 1, 6 do events[i] = false end
   events[7] = { "touch", "screen-1", 5, 5, 0, "player" }
   env = factory.new({ maxW = 40, maxH = 12, maxPulls = 12, events = events,
     internet = { stream = stream } })
   install(env)
-  runApp("apps/tube.lua", env, "demo")
+  runApp("apps/tube.lua", env, "live", "demo")
   local sock = env.component.internet.sockets[1]
   check(sock and sock.written[2] == "PAUSE\n", "touch sent PAUSE")
   check(sock and sock.closed, "socket closed on quit")

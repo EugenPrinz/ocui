@@ -293,10 +293,15 @@ def find_ytdlp():
 
 
 class FFmpegSource:
-    """Decodes with ffmpeg into rgb24 frames scaled/padded to the grid;
-    URLs are fetched by yt-dlp and piped in."""
+    """Decodes with ffmpeg into rgb24 frames scaled/padded to the grid.
+    Sources: "test" (ffmpeg pattern); an http(s) link straight to a video
+    file (read by ffmpeg); any other URL (fetched by yt-dlp and piped in);
+    a local path -- confined to `media_dir` when one is given (the live
+    server), unrestricted when it is None (--convert on your own machine)."""
 
-    def __init__(self, src, width, height, fps, media_dir):
+    VIDEO_EXTENSIONS = (".mp4", ".webm", ".mkv", ".mov", ".avi", ".m4v")
+
+    def __init__(self, src, width, height, fps, media_dir, max_seconds=None):
         ffmpeg = shutil.which("ffmpeg")
         if not ffmpeg:
             raise RuntimeError("ffmpeg not found in PATH")
@@ -305,22 +310,33 @@ class FFmpegSource:
         vf = (f"fps={fps},scale={width}:{height}:force_original_aspect_ratio=decrease:flags=area,"
               f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1")
         out_args = ["-an", "-vf", vf, "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1"]
+        if max_seconds:
+            out_args = ["-t", str(max_seconds)] + out_args
         stdin = None
         if src == "test":
             in_args = ["-f", "lavfi", "-i", f"testsrc2=size=320x200:rate={fps}", "-t", "60"]
             self.title = "ffmpeg test pattern"
         elif src.startswith(("http://", "https://")):
-            ytdlp = find_ytdlp()
-            if not ytdlp:
-                raise RuntimeError("yt-dlp not found (pip install yt-dlp)")
-            self.title = self._title(ytdlp, src)
-            dl = subprocess.Popen(
-                ytdlp + ["-q", "--no-warnings", "-f", "bv*[height<=480]/b[height<=480]/wv*/w",
-                         "-o", "-", src],
-                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-            self.procs.append(dl)
-            stdin = dl.stdout
-            in_args = ["-i", "pipe:0"]
+            if src.lower().split("?")[0].endswith(self.VIDEO_EXTENSIONS):
+                self.title = src.split("?")[0].rsplit("/", 1)[-1] or src
+                in_args = ["-i", src]
+            else:
+                ytdlp = find_ytdlp()
+                if not ytdlp:
+                    raise RuntimeError("yt-dlp not found (pip install yt-dlp)")
+                self.title = self._title(ytdlp, src)
+                dl = subprocess.Popen(
+                    ytdlp + ["-q", "--no-warnings", "-f", "bv*[height<=480]/b[height<=480]/wv*/w",
+                             "-o", "-", src],
+                    stdout=subprocess.PIPE, stderr=sys.stderr)
+                self.procs.append(dl)
+                stdin = dl.stdout
+                in_args = ["-i", "pipe:0"]
+        elif media_dir is None:
+            if not os.path.isfile(src):
+                raise RuntimeError(f"no such file: {src}")
+            self.title = os.path.basename(src)
+            in_args = ["-i", src]
         else:
             path = os.path.realpath(os.path.join(media_dir, src))
             root = os.path.realpath(media_dir)
@@ -361,10 +377,52 @@ class FFmpegSource:
                 pass
 
 
-def open_source(src, width, height, fps, media_dir):
+def open_source(src, width, height, fps, media_dir, max_seconds=None):
     if src == "demo":
-        return DemoSource(width, height, fps)
-    return FFmpegSource(src, width, height, fps, media_dir)
+        return DemoSource(width, height, fps, seconds=min(max_seconds or 120, 120))
+    return FFmpegSource(src, width, height, fps, media_dir, max_seconds)
+
+
+def auto_budget(fps):
+    """Bytes per frame an Internet Card can take: ~20 reads of 2048 bytes
+    per second, minus about one tick per frame for pushing the picture to
+    the screen, with some slack. Mirrors ocui.apps.tube.autoBudget."""
+    reads_per_second = max(20 - fps, 2)
+    return int(reads_per_second * 2048 * 0.85 / fps)
+
+
+def convert(src, out_path, fps, cols, rows, budget, max_seconds, media_dir, log=print):
+    """Encodes a whole video into a .octv file (the same stream the live
+    server sends) for playback over HTTP, e.g. from a GitHub release."""
+    source = open_source(src, cols, rows * 2, fps, media_dir, max_seconds)
+    try:
+        quant = Quantizer()
+        enc = Encoder(cols, rows, budget)
+        frames = 0
+        size = 0
+        with open(out_path, "wb") as out:
+            for chunk in (stream_header(cols, rows, fps), text_message(b"M", source.title)):
+                out.write(chunk)
+                size += len(chunk)
+            while True:
+                rgb = source.read_frame()
+                if rgb is None:
+                    break
+                msg = frame_message(enc.encode(frame_to_cells(rgb, cols, rows, quant)))
+                out.write(msg)
+                size += len(msg)
+                frames += 1
+                if frames % (fps * 30) == 0:
+                    log(f"  {frames // fps} s encoded ({size / 1048576:.1f} MB)")
+            end = text_message(b"E", "end of video")
+            out.write(end)
+            size += len(end)
+        if frames == 0:
+            raise RuntimeError("no frames decoded (unsupported or unreachable source?)")
+        log(f"{source.title}: {frames} frames, {frames / fps:.0f} s, {size / 1048576:.2f} MB -> {out_path}")
+        return frames
+    finally:
+        source.close()
 
 
 # --------------------------------------------------------------- session --
@@ -596,17 +654,36 @@ def main():
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
     ap.add_argument("--media", default=".", help="directory local files are played from")
     ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--convert", metavar="SRC",
+                    help="encode SRC (URL, video file or 'demo') into a .octv file for HTTP playback")
+    ap.add_argument("--out", metavar="FILE", help="output file for --convert")
+    ap.add_argument("--max-seconds", type=int, default=600, help="--convert: cut the video after this long")
     ap.add_argument("--dump-synthetic", metavar="OUT",
-                    help="write a demo stream to OUT (and the expected final cells to OUT.cells)")
-    ap.add_argument("--frames", type=int, default=30)
-    ap.add_argument("--cols", type=int, default=40)
-    ap.add_argument("--rows", type=int, default=12)
-    ap.add_argument("--fps", type=int, default=10)
-    ap.add_argument("--budget", type=int, default=0)
+                    help="(tests) write a demo stream to OUT and the expected final cells to OUT.cells")
+    ap.add_argument("--frames", type=int, default=30, help="(tests) frames for --dump-synthetic")
+    ap.add_argument("--cols", type=int, help="grid width in cells (convert: 160, tests: 40)")
+    ap.add_argument("--rows", type=int, help="grid height in cells (convert: 50, tests: 12)")
+    ap.add_argument("--fps", type=int, help="frames per second (convert: 6, tests: 10)")
+    ap.add_argument("--budget", type=int,
+                    help="bytes per frame (convert: derived from fps; tests: 0 = unlimited)")
     args = ap.parse_args()
     if args.selftest:
         selftest()
+    elif args.convert:
+        fps = args.fps or 6
+        if not args.out:
+            ap.error("--convert needs --out FILE")
+        if not 1 <= fps <= 30:
+            ap.error("--fps must be 1..30")
+        budget = args.budget if args.budget is not None else auto_budget(fps)
+        try:
+            convert(args.convert, args.out, fps, args.cols or 160, args.rows or 50, budget,
+                    args.max_seconds, None)
+        except RuntimeError as e:
+            sys.exit(f"convert failed: {e}")
     elif args.dump_synthetic:
+        args.cols, args.rows = args.cols or 40, args.rows or 12
+        args.fps, args.budget = args.fps or 10, args.budget or 0
         data, sent = synthetic_stream(args.cols, args.rows, args.fps, args.frames, args.budget)
         with open(args.dump_synthetic, "wb") as f:
             f.write(data)

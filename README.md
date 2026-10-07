@@ -16,7 +16,7 @@ component API used was checked against those exact source tags.
 |---|---|---|
 | `hud` | On AR glasses: LSC charge %, stored/capacity, avg IN/OUT, a scrolling net-flow graph (green = charging, red = draining), time to full/empty, maintenance & wireless flags; below it the busy AE2 crafting CPUs with progress bar, % and ETA | Glasses Terminal + linked AR Glasses; Adapter on the LSC controller; Adapter on an ME Interface/Controller |
 | `dashboard` | On a screen: one panel per crafting CPU with output, progress %, ETA | T2+ GPU and screen; Adapter on an ME Interface/Controller |
-| `tube` | On a screen: video player (picture only) for frames streamed by `server/tube_server.py` — YouTube via yt-dlp, local files, or a built-in demo | Internet Card, T3 GPU + screen, the server on a PC (see below) |
+| `tube` | On a screen: video player (picture only) for videos converted by `server/tube_server.py`, played over HTTP (e.g. from a GitHub release, converted by a GitHub Actions workflow — nothing to install) or live from your own PC | Internet Card, T3 GPU + screen |
 | `hudctl` | On a screen: control panel for the HUD (show/hide panels and parts, anchor + offset per panel, width, text size, to-scale preview) and an **Energy** tab: live LSC numbers, net-flow and charge charts over 2 min / 1 h / 24 h, avg/min/max, EU in/out | T2+ GPU and screen (80x25+); an LSC for the Energy tab |
 
 The HUD and the dashboard get their data from shared **services**
@@ -135,13 +135,14 @@ apps/                  programs — copy to /home or /usr/bin
   ocpool.lua            the launcher/controller
   hud.lua               shortcut: hud alone
   hudctl.lua            shortcut: control panel (+ hud, or the background one)
-  tube.lua              shortcut: tube <source> [host:port]
+  tube.lua              shortcut: tube <name|url> / tube live <src> [host:port]
   ae2_dashboard.lua     shortcut: dashboard alone
 
 install.lua            in-game installer/updater (Internet Card)
 
 server/
-  tube_server.py        PC-side video transcoder/streamer for `tube`
+  tube_server.py        video converter (--convert) / live streamer for `tube`
+  tube-workflow.yml     GitHub Actions template for a separate videos repo
 
 mock/                  local test harness — never deployed in-game
   component_factory.lua  fake OpenOS (component/computer/event, gpu,
@@ -184,67 +185,73 @@ Then:
 ## Video player: `tube`
 
 Picture only, no sound: a fun experiment, not a real video player. Expect
-a chunky 160x100 picture in 256 colors at ~5–8 fps.
+a chunky 160x100 picture in 256 colors at ~5–10 fps. Black-and-white
+videos (Bad Apple!!) look best.
 
 **How it works.** OpenComputers can't decode video, so
-`server/tube_server.py` runs on a PC:
+`server/tube_server.py` converts it:
 
-1. It decodes the video with yt-dlp + ffmpeg (or generates the built-in
-   demo) and scales it to 160x100 pixels.
+1. It decodes the video with yt-dlp + ffmpeg and scales it to 160x100
+   pixels.
 2. It packs two pixels into each character cell: an upper half block
    `▀`, whose foreground is the top pixel and background the bottom one.
 3. It maps the colors onto the exact palette of a tier 3 screen.
-4. It streams only the changed cells.
+4. It stores only the changed cells, frame by frame.
 
 An Internet Card reads at most 2048 bytes per server tick (~40 KB/s), so
-the player gives the server a byte budget per frame. The server then
-sends the most visible changes first and the rest a few frames later:
-fast motion smears instead of stalling. The player applies changes in a
-VRAM buffer, where drawing costs no call budget, and pushes the picture
-to the screen once per frame.
+each frame gets a byte budget that fits the link. The most visible
+changes go first and the rest follow a few frames later, so fast motion
+smears instead of stalling. The player applies changes in a VRAM buffer,
+where drawing costs no call budget, and pushes the picture to the screen
+once per frame.
 
-**Setup on the PC** (once):
+There are two ways to play.
 
-```bash
-pip install yt-dlp
-winget install Gyan.FFmpeg
-python server/tube_server.py
-```
+### Converted file over HTTP (default; nothing to install)
 
-`ffmpeg` and `yt-dlp` are only needed for videos. `tube demo` works with
-just Python. The server listens on `127.0.0.1:4123`; use `--host 0.0.0.0`
-to serve other machines and `--media <dir>` to set where local files are
-played from (requests can't leave that directory).
-
-**Allow the connection (single-player).** OpenComputers blocks private
-addresses, including your own PC, by default. In
-`config/OpenComputers.cfg`, in `filteringRules`, add a line **before**
-`"deny private"`:
+Works on remote servers: if `install.lua` worked, the card can reach
+GitHub.
 
 ```
-"allow ip:127.0.0.1",
+tube <name>                     # <library><name>.octv
+tube https://.../video.octv     # any URL
 ```
 
-then restart the game.
+`library` in `/etc/ocui/tube.cfg` defaults to the "videos" release of
+`EugenPrinz/ocui-videos`. Converting happens on GitHub's machines, from
+the browser:
 
-**In game** (Internet Card + T3 GPU and screen):
+1. Create a public repository for videos (e.g. `ocui-videos`). Keep it
+   separate from the code: whatever lands in its release can't affect
+   `ocui`.
+2. Add the file `.github/workflows/tube.yml` with the contents of
+   [`server/tube-workflow.yml`](server/tube-workflow.yml).
+3. Go to Actions → "tube: convert a video" → Run workflow, and give it a
+   YouTube link (or a direct video file link), a name and the fps.
+4. In game: `tube <name>`. When you're done, run the workflow again with
+   `action = delete`.
+
+YouTube sometimes refuses GitHub's servers ("Sign in to confirm you're
+not a bot"). A direct link to a video file always works.
+
+### Live from your own PC (`tube live`)
+
+Run `python server/tube_server.py` on a machine the game server can
+reach; it needs yt-dlp + ffmpeg for videos. Then in game:
 
 ```
-tube demo
-tube https://www.youtube.com/watch?v=...
-tube clip.mp4
-tube <source> 192.168.1.5:4123
+tube live <url|file|demo> [host:port]
 ```
 
-The third form plays a file from the server's `--media` directory; the
-last uses a server other than the one in `/etc/ocui/tube.cfg`. Touch the
-screen to pause, `q` to quit. `/etc/ocui/tube.cfg` holds the default
-`host`, `port` and `source`, plus `fps`, `cols`/`rows` (0 = full screen)
-and `budget` (0 = derived from fps). Lower fps gives more bytes per
-frame, so a sharper picture with less smearing.
+The game server's OpenComputers config must allow TCP, and the address
+must not be filtered. In single-player, add `"allow ip:127.0.0.1",`
+before `"deny private"` in `filteringRules` of
+`config/OpenComputers.cfg`.
 
-Downloading from YouTube with yt-dlp goes against YouTube's terms of
-service; use it for your own or permitted videos.
+Touch the screen to pause, `q` to quit. Downloading from YouTube goes
+against YouTube's terms of service, and publishing other people's videos
+in a public release can draw a takedown notice. Convert your own,
+permitted or freely licensed videos, and delete them after watching.
 
 ## How the numbers are obtained
 
