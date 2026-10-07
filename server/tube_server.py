@@ -328,7 +328,8 @@ class FFmpegSource:
                 dl = subprocess.Popen(
                     ytdlp + ["-q", "--no-warnings", "-f", "bv*[height<=480]/b[height<=480]/wv*/w",
                              "-o", "-", src],
-                    stdout=subprocess.PIPE, stderr=sys.stderr)
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                self._tail(dl, "yt-dlp")
                 self.procs.append(dl)
                 stdin = dl.stdout
                 in_args = ["-i", "pipe:0"]
@@ -346,15 +347,48 @@ class FFmpegSource:
             in_args = ["-i", path]
         self.ff = subprocess.Popen(
             [ffmpeg, "-hide_banner", "-loglevel", "error"] + in_args + out_args,
-            stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self._tail(self.ff, "ffmpeg")
         self.procs.append(self.ff)
 
-    @staticmethod
-    def _title(ytdlp, url):
+    # last lines of each tool's stderr, for error reports
+    def _tail(self, proc, label):
+        if not hasattr(self, "stderr_tails"):
+            self.stderr_tails = {}
+        lines = []
+        self.stderr_tails[label] = lines
+
+        def pump():
+            for raw in proc.stderr:
+                text = raw.decode("utf-8", "replace").rstrip()
+                if text:
+                    print(f"[{label}] {text}", file=sys.stderr, flush=True)
+                    lines.append(text)
+                    del lines[:-8]
+
+        threading.Thread(target=pump, daemon=True).start()
+
+    def diagnostics(self):
+        """What the external tools complained about (empty if nothing)."""
+        for p in self.procs:
+            try:
+                p.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+        time.sleep(0.2)  # let the stderr pumps drain
+        parts = []
+        for label, lines in getattr(self, "stderr_tails", {}).items():
+            if lines:
+                parts.append(f"{label}: " + " / ".join(lines[-3:]))
+        return "; ".join(parts)
+
+    def _title(self, ytdlp, url):
         try:
             out = subprocess.run(ytdlp + ["--no-warnings", "--skip-download", "--print", "title", url],
-                                 capture_output=True, text=True, timeout=30)
+                                 capture_output=True, text=True, timeout=60)
             title = out.stdout.strip().splitlines()
+            if not title and out.stderr.strip():
+                print(f"[yt-dlp] {out.stderr.strip()}", file=sys.stderr, flush=True)
             return title[0] if title else url
         except (OSError, subprocess.SubprocessError):
             return url
@@ -418,7 +452,9 @@ def convert(src, out_path, fps, cols, rows, budget, max_seconds, media_dir, log=
             out.write(end)
             size += len(end)
         if frames == 0:
-            raise RuntimeError("no frames decoded (unsupported or unreachable source?)")
+            why = source.diagnostics() if hasattr(source, "diagnostics") else ""
+            raise RuntimeError("no frames decoded" + (f" -- {why}" if why else
+                                                      " (unsupported or unreachable source?)"))
         log(f"{source.title}: {frames} frames, {frames / fps:.0f} s, {size / 1048576:.2f} MB -> {out_path}")
         return frames
     finally:
