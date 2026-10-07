@@ -91,6 +91,19 @@ eq(lsc.decimalDiff("99999999999999999999", "100000000000000000000"), -1, "negati
 -- the float approach this replaces would get it wrong:
 check(tonumber("123456789012345678901") - tonumber("123456789012345678000") ~= 901,
   "sanity: float subtraction really loses precision here")
+-- differences beyond 2^63: on Lua 5.3 (OC's 64-bit integers) an integer
+-- accumulator wraps around and returns garbage of either sign
+local function near(a, b) return a == b or math.abs(a - b) <= math.abs(b) * 1e-12 end
+local big = lsc.decimalDiff("1000000000000000000000000", "0")
+check(near(big, 1e24), "1E24 - 0 = 1E24 (got " .. tostring(big) .. ")")
+big = lsc.decimalDiff("906000000000000000000001", "1")
+check(near(big, 9.06e23), "9.06E23 difference keeps its size (got " .. tostring(big) .. ")")
+big = lsc.decimalDiff("1", "12345678901234567890")
+check(near(big, -12345678901234567889), "negative 20-digit difference (got " .. tostring(big) .. ")")
+eq(lsc.decimalDiff("123456789012345678901234", "123456789012345678901233"), 1, "24-digit exact diff")
+-- 2^53 + 1: exact as an integer, one past what a double holds exactly
+eq(lsc.decimalDiff("1009007199254740993", "1000000000000000000"), 9007199254740993,
+  "results up to 2^63 stay exact integers")
 
 section("unit: format")
 local fmt = require("ocui.format")
