@@ -32,6 +32,40 @@ function M.signedSi(n, digits)
   return M.si(n, digits)
 end
 
+-- Scientific notation as GregTech shows it: 1234567 -> "1.23E6"; keeps
+-- the sign; values below 1000 print as-is.
+function M.sci(n, digits)
+  if n == nil or n ~= n then return "?" end
+  digits = digits or 2
+  local a = math.abs(n)
+  if a < 1000 then return string.format("%.0f", n) end
+  local e = math.floor(math.log(a, 10))
+  local m = a / 10 ^ e
+  if tonumber(string.format("%." .. digits .. "f", m)) >= 10 then
+    m = m / 10
+    e = e + 1
+  end
+  return (n < 0 and "-" or "") .. string.format("%." .. digits .. "fE%d", m, e)
+end
+
+function M.signedSci(n, digits)
+  if n ~= nil and n > 0 then
+    return "+" .. M.sci(n, digits)
+  end
+  return M.sci(n, digits)
+end
+
+-- The same for an exact digit string of any length (e.g. a wireless EU
+-- balance): "73891000000000000000000" -> "7.38E22". Digits are cut, not
+-- rounded, so the exponent is always right.
+function M.sciDigits(d, digits)
+  digits = digits or 2
+  d = tostring(d):gsub("^0+", "")
+  if d == "" then return "0" end
+  if #d <= 3 then return d end
+  return d:sub(1, 1) .. "." .. d:sub(2, 1 + digits) .. "E" .. (#d - 1)
+end
+
 -- Item counts: plain integer up to 99,999, SI beyond that.
 function M.count(n)
   if n == nil then return "?" end

@@ -156,6 +156,8 @@ end
 --   fill                 -- 0..1
 --   avgIn, avgOut        -- EU/t, 5-second averages from the sensor, or nil
 --   wireless             -- true when the LSC is in wireless mode
+--   wirelessEU           -- digit string: the owner's wireless network EU,
+--                           reported in any mode (nil without sensor data)
 --   maintenanceOk        -- false when the LSC reports maintenance problems
 -- }
 -- opts.wirelessMax: capacity to show 100% against in wireless mode.
@@ -194,10 +196,14 @@ function M.read(proxy, opts)
     r.maintenanceOk = false
   end
 
+  -- The LSC reports its owner's wireless network balance whether or not
+  -- it is in wireless mode itself, so it is always exposed.
+  local wEU = M.firstNumber(line("wirelessEU"))
+  r.wirelessEU = wEU
+
   local wl = line("wirelessMode")
   if type(wl) == "string" and wl:find(GREEN, 1, true) then
     r.wireless = true
-    local wEU = M.firstNumber(line("wirelessEU"))
     if wEU then
       r.storedExact = wEU
       r.stored = tonumber(wEU)

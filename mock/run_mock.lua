@@ -118,6 +118,13 @@ eq(fmt.duration(3725), "1h 2m", "duration h")
 eq(fmt.duration(nil), "--", "duration nil")
 eq(fmt.duration(math.huge), "--", "duration inf")
 eq(fmt.bytes(4 * 1024 * 1024), "4.0M", "bytes")
+eq(fmt.sci(999), "999", "sci below 1000")
+eq(fmt.sci(1234567), "1.23E6", "sci")
+eq(fmt.sci(-9.996e8), "-1.00E9", "sci rounding carries into the exponent")
+eq(fmt.sci(2.5e6, 1), "2.5E6", "sci with one digit")
+eq(fmt.signedSci(1e20), "+1.00E20", "signed sci")
+eq(fmt.sciDigits("73891000000000000000000"), "7.38E22", "sciDigits cuts, exponent exact")
+eq(fmt.sciDigits("000123"), "123", "sciDigits small, leading zeros")
 
 section("unit: ae2 tracker")
 do
@@ -346,6 +353,109 @@ do
   check(ok, "ran")
   eq(env.glasses[1].getObjectCount(), 0, "terminal 1 cleared")
   eq(env.glasses[2].getObjectCount(), 0, "terminal 2 cleared")
+end
+
+section("unit: lsc.read wireless EU with wireless mode off")
+do
+  local env = factory.new({ lsc = { stored = 5, capacity = 1000, net = 0, wireless = false,
+    wirelessEU = "123456" } })
+  install(env)
+  local r = require("ocui.lsc").read(env.component.gt_machine)
+  eq(r.wireless, false, "LSC not in wireless mode")
+  eq(r.wirelessEU, "123456500000000000000000", "network balance read anyway, as exact digits")
+  eq(r.storedExact, "5", "stored stays the LSC's own")
+end
+
+-- ============================================================= wireless ==
+
+local WIRELESS = "apps/wireless.lua"
+
+local function hexOf(w)
+  return math.floor(w.r * 255 + 0.5) * 65536 + math.floor(w.g * 255 + 0.5) * 256
+    + math.floor(w.bl * 255 + 0.5)
+end
+
+local function wirelessRun(title, opts, asserts)
+  section("wireless: " .. title)
+  local env = factory.new(opts)
+  local ok, err = runApp(WIRELESS, env)
+  local snap = env.glasses[1] and env.glasses[1]._state().lastSnapshot or {}
+  local _, texts = factory.renderGlasses(snap, {}, 70, 45)
+  asserts(ok, err, table.concat(texts, "\n"), snap, env)
+end
+
+wirelessRun("24-digit balance, exact NET, LSC not in wireless mode", {
+  glasses = 1, maxPulls = 40,
+  lsc = { stored = 5, capacity = 1000, net = 0, avgIn = 999, avgOut = 1, lang = "ru",
+    wireless = false, wirelessEU = "906000", wirelessNet = 123456789 },
+  events = { false, false, false, false, false, { "key_down", "kb", 50, 3, "player" } }, -- '2'
+}, function(ok, err, all, snap, env)
+  check(ok, "ran: " .. tostring(err))
+  check(all:find("WIRELESS"), "title")
+  check(all:find("9%.06E23 EU"), "balance from line 23 with wireless mode off")
+  check(all:find("NET %+1%.23E8 EU/t"), "NET from the balance change, not the LSC's own IN/OUT")
+  check(all:find("AVG %+1%.23E8 EU/t"), "average of the bars")
+  check(all:find("30s"), "key '2' picked the 30s period")
+  local fractional, green, widths = 0, 0, {}
+  for _, w in ipairs(snap) do
+    if w.kind == "rect" then
+      for _, v in ipairs({ w.x, w.y, w.a, w.b }) do
+        if v ~= math.floor(v) then fractional = fractional + 1 end
+      end
+      if hexOf(w) == 0x66D966 and w.a > 0 then
+        green = green + 1
+        widths[w.b] = true
+      end
+    end
+  end
+  eq(fractional, 0, "every rect on whole pixels")
+  check(green >= 2, "positive flow drawn as green bars (" .. green .. ")")
+  local n = 0
+  for _ in pairs(widths) do n = n + 1 end
+  eq(n, 1, "all bars equally wide")
+  check((env.files["/etc/ocui/wireless.cfg"] or ""):find("periods"), "wireless.cfg written with defaults")
+  local pk = env.glasses[1]._state().packets
+  check(pk < 1500, "packet count stays bounded by caching (" .. pk .. ")")
+end)
+
+wirelessRun("draining network", {
+  glasses = 1, maxPulls = 15,
+  lsc = { stored = 5, capacity = 1000, net = 0, wireless = true,
+    wirelessEU = "1234567", wirelessNet = -5000000000 },
+}, function(ok, err, all, snap)
+  check(ok, "ran: " .. tostring(err))
+  check(all:find("1%.23E24 EU"), "25-digit balance")
+  check(all:find("NET %-5%.00E9 EU/t"), "negative NET")
+  local red = 0
+  for _, w in ipairs(snap) do
+    if w.kind == "rect" and hexOf(w) == 0xE6664D and w.a > 0 then red = red + 1 end
+  end
+  check(red >= 1, "draining shown as red bars")
+end)
+
+wirelessRun("no LSC", { glasses = 1, maxPulls = 3 }, function(ok, err, all)
+  check(ok, "ran: " .. tostring(err))
+  check(all:find("LSC not found"), "explains the missing LSC")
+end)
+
+do
+  section("wireless: anchored to the screen size from the glasses")
+  local env = factory.new({ glasses = 1, maxPulls = 6, lsc = { stored = 5, capacity = 1000, net = 0,
+    wirelessEU = 1000 }, events = { false, { "glasses_on", "player", 800, 450 }, false } })
+  install(env)
+  require("ocui.config").save("wireless", { anchor = "bottom-right", x = 2, y = 2 })
+  local ok, err = runApp(WIRELESS, env)
+  check(ok, "ran: " .. tostring(err))
+  local right, bottom = 0, 0
+  for _, w in ipairs(env.glasses[1]._state().lastSnapshot or {}) do
+    if w.kind == "rect" then
+      right = math.max(right, w.x + w.b)
+      bottom = math.max(bottom, w.y + w.a)
+    end
+  end
+  eq(right, 800 - 2, "right edge 2 px from the 800 px screen edge")
+  eq(bottom, 450 - 2, "bottom edge 2 px from the 450 px screen edge")
+  check((env.files["/etc/ocui/wireless.cfg"] or ""):find("w = 800"), "screen size remembered")
 end
 
 -- ================================================================ loop ==

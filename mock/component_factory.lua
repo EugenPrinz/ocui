@@ -258,7 +258,7 @@ end
 -- --------------------------------------------------------- fake LSC (gt) --
 
 local function group(n, sep)
-  local s = string.format("%d", n)
+  local s = type(n) == "string" and n or string.format("%d", n)
   local out = s:reverse():gsub("(%d%d%d)", "%1" .. sep:reverse()):reverse()
   if out:sub(1, #sep) == sep then out = out:sub(#sep + 1) end
   return out
@@ -266,7 +266,9 @@ end
 
 -- def = { stored, capacity (integers), net = EU/t (integer),
 --         avgIn, avgOut, lang = "en"|"ru", maintenanceOk, wireless,
---         wirelessEU, noSensor, noStringMethods }
+--         wirelessEU, wirelessNet, noSensor, noStringMethods }
+-- wirelessEU may be a digit string for balances beyond 64-bit integers:
+-- it then gets an 18-digit tail that moves by wirelessNet EU/t.
 local function newLsc(def, clock)
   local lsc = { type = "gt_machine" }
   local function storedNow()
@@ -274,6 +276,14 @@ local function newLsc(def, clock)
     if s < 0 then s = 0 end
     if s > def.capacity then s = def.capacity end
     return s
+  end
+
+  local function wirelessNow()
+    local moved = math.floor((def.wirelessNet or 0) * 20 * clock())
+    if type(def.wirelessEU) == "string" then
+      return def.wirelessEU .. string.format("%018d", 500000000000000000 + moved)
+    end
+    return (def.wirelessEU or 0) + moved
   end
 
   function lsc.getName() return "multimachine.supercapacitor" end
@@ -297,7 +307,7 @@ local function newLsc(def, clock)
       local wl = def.wireless
         and (S .. "a" .. (ru and "включён" or "enabled") .. S .. "r")
         or (S .. "c" .. (ru and "отключён" or "disabled") .. S .. "r")
-      local wEU = group(def.wirelessEU or 0, sep)
+      local wEU = group(wirelessNow(), sep)
       local lines = {
         S .. "eOperational Data:" .. S .. "r",
         "EU Stored: " .. group(storedNow(), sep) .. " EU",

@@ -6,8 +6,8 @@
 --   /tmp/install.lua <ref>      -- a branch, tag or commit
 --
 -- Library -> /lib/ocui, programs -> /usr/bin (ocpool, hud, hudctl,
--- ae2_dashboard run from any directory). Your settings in /etc/ocui are
--- never touched. Everything is downloaded first and written only if every
+-- ae2_dashboard, wireless run from any directory). Your settings in
+-- /etc/ocui are never touched. Everything is downloaded first and written only if every
 -- file arrived, so a dropped connection can't leave a half-updated install.
 
 local component = require("component")
@@ -36,12 +36,14 @@ local FILES = {
   { "ocui/apps/dashboard.lua",     "/lib/ocui/apps/dashboard.lua" },
   { "ocui/apps/hud.lua",           "/lib/ocui/apps/hud.lua" },
   { "ocui/apps/hudctl.lua",        "/lib/ocui/apps/hudctl.lua" },
+  { "ocui/apps/wireless.lua",      "/lib/ocui/apps/wireless.lua" },
   { "ocui/services/crafting.lua",  "/lib/ocui/services/crafting.lua" },
   { "ocui/services/energy.lua",    "/lib/ocui/services/energy.lua" },
   { "apps/ocpool.lua",             "/usr/bin/ocpool.lua" },
   { "apps/hud.lua",                "/usr/bin/hud.lua" },
   { "apps/hudctl.lua",             "/usr/bin/hudctl.lua" },
   { "apps/ae2_dashboard.lua",      "/usr/bin/ae2_dashboard.lua" },
+  { "apps/wireless.lua",           "/usr/bin/wireless.lua" },
 }
 
 -- Copies from the first ocui version, which was copied into /home by hand.

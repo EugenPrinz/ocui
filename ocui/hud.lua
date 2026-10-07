@@ -327,6 +327,15 @@ function Group:graph(props)
   return adopt(self, Graph.new(self.surface, p), dx, dy)
 end
 
+-- Moves one child to a new offset from the group's origin (e.g. to keep
+-- a changing text right-aligned); later moveTo() calls keep that offset.
+function Group:place(el, dx, dy)
+  for _, c in ipairs(self.children) do
+    if c.el == el then c.dx, c.dy = dx, dy end
+  end
+  el:setPosition(self.x + dx, self.y + dy)
+end
+
 function Group:moveTo(x, y)
   self.x, self.y = x, y
   for _, c in ipairs(self.children) do

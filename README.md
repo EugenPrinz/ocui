@@ -17,6 +17,7 @@ component API used was checked against those exact source tags.
 | `hud` | On AR glasses: LSC charge %, stored/capacity, avg IN/OUT, a scrolling net-flow graph (green = charging, red = draining), time to full/empty, maintenance & wireless flags; below it the busy AE2 crafting CPUs with progress bar, % and ETA | Glasses Terminal + linked AR Glasses; Adapter on the LSC controller; Adapter on an ME Interface/Controller |
 | `dashboard` | On a screen: one panel per crafting CPU with output, progress %, ETA | T2+ GPU and screen; Adapter on an ME Interface/Controller |
 | `hudctl` | On a screen: control panel for the HUD (show/hide panels and parts, anchor + offset per panel, width, text size, to-scale preview) and an **Energy** tab: live LSC numbers, net-flow and charge charts over 2 min / 1 h / 24 h, avg/min/max, EU in/out | T2+ GPU and screen (80x25+); an LSC for the Energy tab |
+| `wireless` | On AR glasses: the balance of your GT wireless EU network, its net flow over a sliding window and a bar chart of past flow, all computed exactly from the full 20+ digit balance; bar period 10 s … 30 min, switched with 1..6 / w on the computer | Glasses Terminal + linked AR Glasses; Adapter on any LSC controller (wireless mode not needed) |
 
 The HUD and the dashboard get their data from shared **services**
 (`energy` for the LSC, `crafting` for AE2). Each service polls once, for
@@ -41,7 +42,9 @@ ocpool quit                 stop the background pool
 ocpool log                  /tmp/ocpool.log (crash tracebacks end up here)
 ```
 
-`hud`, `ae2_dashboard` and `hudctl` work as single-command shortcuts.
+`hud`, `ae2_dashboard`, `hudctl` and `wireless` work as single-command
+shortcuts. `hud` and `wireless` each take the glasses terminal for
+themselves, so run them on different terminals or one at a time.
 `hudctl` runs the HUD alongside itself, or, if a background pool is
 already running (`ocpool -b hud`), controls the HUD in that pool.
 
@@ -88,6 +91,11 @@ the file.
 - `energy.cfg`: `address` (which gt_machine is the LSC), `interval`,
   `wirelessMax`.
 - `crafting.cfg`: `interval` (each poll costs 1 + 3 x busy CPUs ticks).
+- `wireless.cfg`: `scale` (whole panel), `textScale`, `anchor`, `x`/`y`,
+  `screen` (learned from the glasses), sizes at scale 1 (`width`,
+  `chartHeight`, `barWidth`, `barGap`, ...), `periods`/`period` (bar
+  periods and the default), `keys`, `bold`, `shadow`, `colors`/`alpha`,
+  `debug` (logs the LSC's sensor lines).
 - `dashboard.cfg`, `hudctl.cfg`: `gpu`, `screen`.
 - `ocpool.cfg`: `autostart`, `restartDelay`, `maxRestarts`.
 
@@ -127,12 +135,14 @@ ocui/                 the library — copy this whole folder to /lib/ocui
     hud.lua             app: glasses HUD (LSC + autocraft)
     hudctl.lua          app: HUD control panel + energy charts
     dashboard.lua       app: screen dashboard of crafting CPUs
+    wireless.lua        app: glasses HUD of the wireless EU network
 
 apps/                  programs — copy to /home or /usr/bin
   ocpool.lua            the launcher/controller
   hud.lua               shortcut: hud alone
   hudctl.lua            shortcut: control panel (+ hud, or the background one)
   ae2_dashboard.lua     shortcut: dashboard alone
+  wireless.lua          shortcut: wireless alone
 
 install.lua            in-game installer/updater (Internet Card)
 
@@ -156,7 +166,8 @@ The same two commands update an existing install. `install.lua`:
 - downloads every file first and writes nothing if any download fails,
   so a dropped connection can't leave a mix of old and new versions;
 - puts the library into `/lib/ocui` and the programs into `/usr/bin`, so
-  `ocpool`, `hud`, `hudctl` and `ae2_dashboard` run from any directory;
+  `ocpool`, `hud`, `hudctl`, `ae2_dashboard` and `wireless` run from any
+  directory;
 - clears the cached `ocui` modules from memory;
 - never touches your settings in `/etc/ocui`.
 
@@ -199,7 +210,11 @@ locale's thousands separators (`,`, NBSP, …). If a future pack shifts the
 lines, adjust `ocui/lsc.lua`'s `DEFAULT_SENSOR_LINES`. Without sensor data
 the net flow falls back to the change in stored EU, computed with exact
 decimal-string subtraction (floats can't resolve per-second deltas on
-20+ digit totals). In wireless mode the bar shows wireless EU against
+20+ digit totals; the result is accumulated as a float, since OC's Lua
+5.3 integers would wrap past 9.2E18). Every LSC reports its owner's
+wireless network balance (line 23) whether or not it is in wireless mode;
+the `wireless` app charts the change of that balance. In wireless mode the
+`hud` bar shows wireless EU against
 `lsc.wirelessMax`.
 
 **HUD cost.** Widget setters on the glasses are executed directly (no
