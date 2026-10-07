@@ -399,6 +399,12 @@ do
   local t = { b = 2, a = "x", nested = { flag = true, list = { 1, 2, 3 } }, [5] = "five" }
   local back = config.parse(config.serialize(t))
   check(back and back.a == "x" and back.nested.list[3] == 3 and back[5] == "five", "serialize/parse round trip")
+  eq(config.serialize({ a = 0.55 }):match("a = ([^,]+)"), "0.55", "floats written in their shortest form")
+  local tricky = { 0.1 + 0.2, 1 / 3, 1e15, 2.5e-7, 123456789.123 }
+  local back2 = config.parse(config.serialize(tricky))
+  local exact = true
+  for i, v in ipairs(tricky) do if back2[i] ~= v then exact = false end end
+  check(exact, "floats still read back exactly")
   local merged = config.merge({ a = 1, sub = { x = 1, y = 2 }, list = { "hud" } },
     { sub = { y = 5 }, list = { "dashboard", "x" } })
   check(merged.a == 1 and merged.sub.x == 1 and merged.sub.y == 5, "nested tables merge key by key")

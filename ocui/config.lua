@@ -50,6 +50,12 @@ local function serializeValue(v, indent)
     if v == math.floor(v) and math.abs(v) < 1e15 then
       return string.format("%.0f", v)
     end
+    -- shortest form that reads back as the same number (0.55, not
+    -- 0.55000000000000004)
+    for digits = 15, 17 do
+      local text = string.format("%." .. digits .. "g", v)
+      if tonumber(text) == v then return text end
+    end
     return string.format("%.17g", v)
   elseif tv == "boolean" or tv == "nil" then
     return tostring(v)
