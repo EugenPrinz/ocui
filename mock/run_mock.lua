@@ -750,7 +750,7 @@ end
 section("hud: anchors and screen size from the glasses")
 do
   local env = factory.new({ glasses = 1, maxPulls = 8, lsc = LSC_EN,
-    events = { false, false, { "glasses_on", "player", 800, 450 }, false, false } })
+    events = { false, false, { "glasses_on", "glasses-1", "player", 800, 450 }, false, false } })
   install(env)
   require("ocui.config").save("hud", { lsc = { anchor = "top-right", x = 6, y = 6 }, crafting = { enabled = false } })
   local ok, err = runApp(HUD, env)
@@ -761,8 +761,10 @@ do
     if w.kind == "text" and w.text == "LSC" and w.visible then lscX = w.x end
   end
   eq(lscX, 800 - 190 - 6 + 4, "top-right anchor re-placed for the 800 px wide screen")
-  local cfgText = env.files["/etc/ocui/hud.cfg"] or ""
-  check(cfgText:find("w = 800") and cfgText:find("h = 450"), "screen size remembered in hud.cfg")
+  local saved = require("ocui.config").parse((env.files["/etc/ocui/hud.cfg"] or ""):gsub("^%-%-[^\n]*\n", ""))
+  local prof = saved and saved.profiles and saved.profiles["glasses-1"]
+  check(prof and prof.screen.w == 800 and prof.screen.h == 450, "screen size remembered in the terminal's profile")
+  check(saved and saved.default.screen.w == 640, "template keeps its own screen size")
   check(not glassesTexts(env):find("Autocraft"), "disabled autocraft panel not drawn")
 end
 
@@ -791,16 +793,20 @@ do
   local ok, err = runApp(HUD, env)
   check(ok, "ran: " .. tostring(err))
   local cfg = require("ocui.config").parse(env.files["/etc/ocui/hud.cfg"]:gsub("^%-%-[^\n]*\n", ""))
-  check(cfg and cfg.lsc.x == 20 and cfg.lsc.y == 30, "old origin became the LSC offset")
-  check(cfg and cfg.x == nil and cfg.lsc.interval == nil and cfg.crafting.interval == nil, "legacy keys removed")
-  eq(cfg and cfg.width, 210, "other settings kept")
+  check(cfg and cfg.default.lsc.x == 20 and cfg.default.lsc.y == 30, "old origin became the template's LSC offset")
+  check(cfg and cfg.x == nil and cfg.lsc == nil and cfg.default.lsc.interval == nil
+    and cfg.default.crafting.interval == nil, "legacy keys removed")
+  eq(cfg and cfg.default.width, 210, "other settings kept")
+  local prof = cfg and cfg.profiles["glasses-1"]
+  check(prof and prof.lsc.x == 20 and prof.width == 210, "the connected terminal got a copy of it")
+  eq(prof and prof.label, "player", "profile labelled with the bound player")
 end
 
 section("hud: panel heights fit their content")
 do
   install(factory.new({}))
   local hudApp = require("ocui.apps.hud")
-  local cfg = require("ocui.config").copy(hudApp.defaults)
+  local cfg = require("ocui.config").copy(hudApp.PROFILE_DEFAULTS)
   local full = hudApp.heights(cfg).lsc
   cfg.lsc.showGraph = false
   local noGraph = hudApp.heights(cfg).lsc
@@ -809,6 +815,118 @@ do
   check(full > noGraph and noGraph > minimal, "hiding parts shrinks the panel")
   eq(full - noGraph, 10 + 1 + 34 + 3 - 10, "graph accounts for exactly its rows")
   eq(hudApp.heights(cfg, 3).crafting - hudApp.heights(cfg, 2).crafting, 16, "one row = 16 px")
+end
+
+-- ============================================================ profiles ==
+
+-- Visible texts on one terminal: live widgets, or the state before the
+-- final clear when the app has exited.
+local function terminalTexts(g)
+  local snap = g._snapshot()
+  if #snap == 0 then snap = g._state().lastSnapshot or {} end
+  local _, texts = factory.renderGlasses(snap, {}, 70, 45)
+  return table.concat(texts, "\n")
+end
+
+local function savedHudCfg(env)
+  return require("ocui.config").parse((env.files["/etc/ocui/hud.cfg"] or ""):gsub("^%-%-[^\n]*\n", ""))
+end
+
+section("hud profiles: one per terminal")
+do
+  local env = factory.new({ glasses = 3, maxPulls = 10, lsc = LSC_EN,
+    glassesPlayers = { { "Bogdan" }, { "Alex", "Max" }, {} },
+    cpus = { { name = "A", storage = 1, coprocessors = 1, work = 900, rate = 5,
+      output = { name = "x:y", label = "Chip", size = 1 } } },
+    events = { false, { "glasses_on", "glasses-2", "Alex", 800, 450 }, false } })
+  install(env)
+  require("ocui.config").save("hud", {
+    profiles = {
+      ["glasses-1"] = { label = "Bogdan", crafting = { enabled = false } },
+      ["glasses-2"] = { label = "Alex", lsc = { enabled = false } },
+    },
+  })
+  local ok, err = runApp(HUD, env)
+  check(ok, "ran: " .. tostring(err))
+  local t1, t2, t3 = terminalTexts(env.glasses[1]), terminalTexts(env.glasses[2]), terminalTexts(env.glasses[3])
+  check(t1:find("LSC") and not t1:find("Autocraft"), "terminal 1: LSC only (its profile)")
+  check(t2:find("Autocraft") and not t2:find("LSC"), "terminal 2: autocraft only (its profile)")
+  check(t3:find("LSC") and t3:find("Autocraft"), "terminal 3: new, gets the full template")
+
+  local cfg = savedHudCfg(env)
+  local p3 = cfg and cfg.profiles["glasses-3"]
+  check(p3 ~= nil, "profile created for the new terminal")
+  eq(p3 and p3.label, "terminal glasses-", "no bound players -> labelled by address")
+  eq(cfg and cfg.profiles["glasses-2"].screen.w, 800, "glasses_on updated terminal 2's screen")
+  eq(cfg and cfg.profiles["glasses-1"].screen.w, 640, "terminal 1's screen untouched")
+  check(cfg and cfg.profiles["glasses-1"].crafting.enabled == false, "existing profile kept as configured")
+end
+
+section("hud profiles: switched-off terminal, labels, hot-plug")
+do
+  local env
+  local events = { false, false }
+  table.insert(events, function()
+    local address = env.addGlasses({ "Newbie" })
+    return { "component_added", address, "glasses" }
+  end)
+  for _ = 1, 3 do table.insert(events, false) end
+  env = factory.new({ glasses = 2, maxPulls = #events, events = events, lsc = LSC_EN,
+    glassesPlayers = { { "Bogdan" }, { "Alex" } } })
+  install(env)
+  require("ocui.config").save("hud", { profiles = { ["glasses-2"] = { label = "Alex", enabled = false } } })
+  local ok, err = runApp(HUD, env)
+  check(ok, "ran: " .. tostring(err))
+  check(terminalTexts(env.glasses[1]):find("LSC"), "terminal 1 shows the HUD")
+  eq(terminalTexts(env.glasses[2]), "", "switched-off terminal stays empty")
+  check(terminalTexts(env.glasses[3]):find("LSC"), "terminal plugged in at runtime got a HUD")
+  local cfg = savedHudCfg(env)
+  eq(cfg and cfg.profiles["glasses-1"].label, "Bogdan", "new profile labelled with the bound player")
+  eq(cfg and cfg.profiles["glasses-3"] and cfg.profiles["glasses-3"].label, "Newbie",
+    "hot-plugged terminal's profile saved")
+  eq(cfg and cfg.profiles["glasses-2"].enabled, false, "switch-off kept")
+end
+
+section("hudctl profiles: picker and apply-to-all")
+do
+  local env
+  local envRef = function() return env end
+  local events = { false, false, false }
+  -- two terminals -> starts on the template; apply it to every terminal
+  table.insert(events, touchText(envRef, "Apply to all terminals"))
+  for _ = 1, 10 do table.insert(events, false) end
+  env = factory.new({ glasses = 2, maxPulls = #events, events = events, lsc = LSC_EN,
+    glassesPlayers = { { "Bogdan" }, { "Alex" } } })
+  install(env)
+  require("ocui.config").save("hud", {
+    default = { width = 230 },
+    profiles = {
+      ["glasses-1"] = { label = "Bogdan", width = 150, screen = { w = 800, h = 450 } },
+      ["glasses-2"] = { label = "Alex", width = 170, enabled = false },
+    },
+  })
+  local Pool = require("ocui.pool")
+  local pool = Pool.new({ maxRestarts = 0 })
+  pool:register(require("ocui.apps.hud"))
+  pool:register(require("ocui.apps.hudctl"))
+  local restarts = 0
+  local origRestart = pool.restart
+  pool.restart = function(self, name) restarts = restarts + 1; return origRestart(self, name) end
+  local firstFrame
+  pool:register({ name = "peek", start = function(ctx)
+    ctx:every(0.5, function()
+      firstFrame = firstFrame or (env.gpu._screen():find("Profile") and env.gpu._screen())
+    end)
+  end })
+  pool:run({ "hud", "hudctl", "peek" })
+  check(firstFrame and firstFrame:find("Profile: < Default %(new terminals%) >"),
+    "several terminals -> the template is selected")
+  local cfg = savedHudCfg(env)
+  local p1, p2 = cfg and cfg.profiles["glasses-1"], cfg and cfg.profiles["glasses-2"]
+  check(p1 and p1.width == 230 and p2 and p2.width == 230, "template copied into every profile")
+  check(p1 and p1.label == "Bogdan" and p1.screen.w == 800, "terminal's label and screen kept")
+  check(p2 and p2.enabled == false, "terminal's on/off switch kept")
+  eq(restarts, 1, "HUD restarted once to show it")
 end
 
 -- ============================================================== hudctl ==
@@ -856,8 +974,10 @@ do
     check(a.state ~= "failed", a.name .. " ok: " .. tostring(a.error))
   end
   local cfg = require("ocui.config").parse((env.files["/etc/ocui/hud.cfg"] or ""):gsub("^%-%-[^\n]*\n", ""))
-  check(cfg and cfg.crafting.enabled == false, "toggle saved: crafting.enabled = false")
-  check(cfg and cfg.lsc.x == 16, "nudge saved: lsc.x 6 -> 16 (got " .. tostring(cfg and cfg.lsc.x) .. ")")
+  local prof = cfg and cfg.profiles["glasses-1"]
+  check(prof and prof.crafting.enabled == false, "toggle saved in the terminal's profile")
+  check(prof and prof.lsc.x == 16, "nudge saved: lsc.x 6 -> 16 (got " .. tostring(prof and prof.lsc.x) .. ")")
+  check(cfg and cfg.default.crafting.enabled == true, "template untouched")
   eq(restarts, 1, "hiding a panel restarted the HUD once; the move didn't")
   check(lscXs[1] == 10 and lscXs[#lscXs] == 20, "LSC panel moved live from x=10 to x=20")
   check(not glassesTexts(env):find("Autocraft"), "HUD rebuilt without the autocraft panel")
@@ -885,6 +1005,7 @@ do
   install(env)
   local Pool = require("ocui.pool")
   local configLib = require("ocui.config")
+  configLib.save("hud", { profiles = { ["glasses-1"] = { label = "Bogdan" } } })
   local pool = Pool.new({ maxRestarts = 0 })
   pool:register(require("ocui.apps.hudctl"))
   -- stand-in for the background pool: answers status, records commands
@@ -904,10 +1025,12 @@ do
   local hudFrame = env.gpu._lastFrame() or ""
   if verbose then print(hudFrame) end
   check(hudFrame:find("HUD: running %(background pool%)"), "status learned from the background pool")
-  check(#layouts >= 1 and layouts[1].lsc.x == 16, "live move sent as ocui_hud_layout signal (x=16)")
+  check(#layouts >= 1 and layouts[1].lsc.x == 16 and layouts[1].profile == "glasses-1",
+    "live move for that terminal sent as ocui_hud_layout signal (x=16)")
   eq(commands[#commands], "restart", "structural edit restarted the remote HUD")
   local cfg = configLib.parse((env.files["/etc/ocui/hud.cfg"] or ""):gsub("^%-%-[^\n]*\n", ""))
-  check(cfg and cfg.lsc.showGraph == false and cfg.lsc.x == 16, "both edits saved to hud.cfg")
+  local prof = cfg and cfg.profiles["glasses-1"]
+  check(prof and prof.lsc.showGraph == false and prof.lsc.x == 16, "both edits saved to the profile")
 end
 
 -- ============================================================= install ==

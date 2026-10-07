@@ -339,8 +339,9 @@ end
 
 -- ------------------------------------------------------------ fake glasses --
 
-local function newGlasses()
+local function newGlasses(players)
   local g = { type = "glasses" }
+  function g.getBindPlayers() return table.unpack(players or { "player" }) end
   local widgets = {}
   local state = { packets = 0, lastSnapshot = nil }
 
@@ -476,7 +477,7 @@ function M.new(opts)
   end
   local glassesList = {}
   for i = 1, opts.glasses or 0 do
-    local g = newGlasses()
+    local g = newGlasses(opts.glassesPlayers and opts.glassesPlayers[i])
     register(g, "glasses-" .. i)
     table.insert(glassesList, g)
   end
@@ -616,6 +617,15 @@ function M.new(opts)
     gpu = gpu,
     gpus = gpus,
     glasses = glassesList,
+    -- plugs in another glasses terminal mid-run; returns its address (the
+    -- caller scripts the matching component_added signal)
+    addGlasses = function(players)
+      local g = newGlasses(players)
+      local address = "glasses-" .. (#glassesList + 1)
+      register(g, address)
+      table.insert(glassesList, g)
+      return address
+    end,
     pulls = function() return pulls end,
     clock = now,
   }

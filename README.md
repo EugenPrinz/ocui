@@ -16,7 +16,7 @@ component API used was checked against those exact source tags.
 |---|---|---|
 | `hud` | On AR glasses: LSC charge %, stored/capacity, avg IN/OUT, a scrolling net-flow graph (green = charging, red = draining), time to full/empty, maintenance & wireless flags; below it the busy AE2 crafting CPUs with progress bar, % and ETA | Glasses Terminal + linked AR Glasses; Adapter on the LSC controller; Adapter on an ME Interface/Controller |
 | `dashboard` | On a screen: one panel per crafting CPU with output, progress %, ETA | T2+ GPU and screen; Adapter on an ME Interface/Controller |
-| `hudctl` | On a screen: control panel for the HUD (show/hide panels and parts, anchor + offset per panel, width, text size, to-scale preview) and an **Energy** tab: live LSC numbers, net-flow and charge charts over 2 min / 1 h / 24 h, avg/min/max, EU in/out | T2+ GPU and screen (80x25+); an LSC for the Energy tab |
+| `hudctl` | On a screen: control panel for the HUD (a profile per glasses terminal; show/hide panels and parts, anchor + offset per panel, width, text size, to-scale preview) and an **Energy** tab: live LSC numbers, net-flow and charge charts over 2 min / 1 h / 24 h, avg/min/max, EU in/out | T2+ GPU and screen (80x25+); an LSC for the Energy tab |
 
 The HUD and the dashboard get their data from shared **services**
 (`energy` for the LSC, `crafting` for AE2). Each service polls once, for
@@ -74,10 +74,24 @@ merged over the defaults, so new options from an update appear without
 losing your edits. A broken file stops only that app, and the error names
 the file.
 
-- `hud.cfg` (easiest via `hudctl`):
+- `hud.cfg` (easiest via `hudctl`) holds **one profile per Glasses
+  Terminal**. With OCGlasses, everyone bound to a terminal sees the same
+  widgets, so give each player their own terminal (all on the same
+  computer) and they each get their own HUD.
+  - `default` is the template. A terminal the HUD hasn't seen before gets
+    a copy of it, labelled with the players bound to it.
+  - `profiles["<terminal address>"]` holds each terminal's own settings.
+    In `hudctl`, pick the profile at the top. `Reset to template` copies
+    the template into it, `Apply to all terminals` copies it into every
+    profile, and `Forget` drops the profile of a terminal that is no
+    longer connected. All three keep each terminal's label, on/off switch
+    and screen size.
+
+  Each profile has:
+  - `label`, `enabled` (false = nothing on that terminal);
   - `width`, `alpha`, `textScale`;
-  - `screen` — the player's GUI size; learned automatically when the
-    glasses are put on;
+  - `screen` — the player's GUI size; learned automatically when glasses
+    linked to that terminal are put on;
   - `lsc.*` — `enabled`, `anchor` (top-left / top-right / bottom-left /
     bottom-right), `x`/`y` offset from that corner, `showFlow`,
     `showGraph`, `graphWindow` (2m / 1h / 24h), `graphBars`,
@@ -96,7 +110,9 @@ Scale. Anchoring a panel to the corner it lives in keeps it there when
 those change. OCGlasses only reports the size when the glasses are put
 on, so after resizing the window, take the glasses off and on again.
 
-> Upgrading: older `hud.cfg` files (a single `x`/`y` for the whole HUD,
+> Upgrading: a single-profile `hud.cfg` from before profiles becomes the
+> `default` template, and every connected terminal starts from it. Older
+> `hud.cfg` files (a single `x`/`y` for the whole HUD,
 > intervals inside `lsc`/`crafting`) are converted automatically on the
 > first start. The old `x`/`y` becomes the LSC panel's offset, and the
 > intervals now live in `energy.cfg` and `crafting.cfg`.

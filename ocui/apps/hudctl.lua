@@ -16,6 +16,7 @@
 -- Energy tab has history only from when hudctl started.
 -- Needs a T2+ GPU + screen (80x25 or larger). Config: /etc/ocui/hudctl.cfg
 
+local component = require("component")
 local computer = require("computer")
 
 local App = require("ocui.app")
@@ -83,7 +84,52 @@ function M.start(ctx, cfg)
   local hudCfg, loadErr = config.load("hud", hudApp.defaults)
   if hudCfg then hudCfg = hudApp.normalize(hudCfg) end
 
-  local ui = { tab = 1, window = "2m", message = nil }
+  local ui = { tab = 1, window = "2m", message = nil, profile = "default" }
+
+  -- Profiles: "default" (template for new terminals) or a terminal address.
+  local function connectedTerminals()
+    local set = {}
+    for address in component.list("glasses", true) do set[address] = true end
+    return set
+  end
+
+  local function current()
+    if ui.profile ~= "default" and hudCfg.profiles[ui.profile] then
+      return hudCfg.profiles[ui.profile]
+    end
+    ui.profile = "default"
+    return hudCfg.default
+  end
+
+  local function profileIds()
+    local ids = {}
+    for address in pairs(hudCfg and hudCfg.profiles or {}) do table.insert(ids, address) end
+    table.sort(ids, function(a, b)
+      local la, lb = hudCfg.profiles[a].label or "", hudCfg.profiles[b].label or ""
+      if la ~= lb then return la < lb end
+      return a < b
+    end)
+    table.insert(ids, 1, "default")
+    return ids
+  end
+
+  local function profileName(id)
+    if id == "default" then return "Default (new terminals)" end
+    local p = hudCfg.profiles[id]
+    local label = (p and p.label ~= "" and p.label) or "terminal"
+    local name = label .. " [" .. id:sub(1, 8) .. "]"
+    if not connectedTerminals()[id] then name = name .. " (offline)" end
+    return name
+  end
+
+  -- start on the only connected terminal's profile, if there is exactly one
+  if hudCfg then
+    local only, count = nil, 0
+    for address in pairs(connectedTerminals()) do
+      if hudCfg.profiles[address] then only, count = address, count + 1 end
+    end
+    if count == 1 then ui.profile = only end
+  end
   local pending = nil
   local app
   local root = base.Container.new({})
@@ -142,15 +188,20 @@ function M.start(ctx, cfg)
 
   -- Records an edit: layout-only edits go to the running HUD at once;
   -- everything is saved (and the HUD restarted if `rebuild`) after a pause.
+  -- (Editing the template only affects terminals added later, so it
+  -- never restarts the HUD.)
   local function edited(rebuild)
+    local prof = current()
+    if ui.profile == "default" then rebuild = false end
     pending = pending or {}
     pending.at = computer.uptime() + APPLY_DELAY
     pending.rebuild = pending.rebuild or rebuild
-    if not rebuild then
+    if not rebuild and ui.profile ~= "default" then
       local layout = {
-        lsc = { anchor = hudCfg.lsc.anchor, x = hudCfg.lsc.x, y = hudCfg.lsc.y },
-        crafting = { anchor = hudCfg.crafting.anchor, x = hudCfg.crafting.x,
-          y = hudCfg.crafting.y, stack = hudCfg.crafting.stack },
+        profile = ui.profile,
+        lsc = { anchor = prof.lsc.anchor, x = prof.lsc.x, y = prof.lsc.y },
+        crafting = { anchor = prof.crafting.anchor, x = prof.crafting.x,
+          y = prof.crafting.y, stack = prof.crafting.stack },
       }
       if localHud() then
         ctx:emit("hud_layout", layout)
@@ -159,6 +210,24 @@ function M.start(ctx, cfg)
       end
     end
     ui.message = "unsaved changes..."
+    invalidate()
+  end
+
+  -- Copies the template into a terminal profile, keeping what belongs to
+  -- that terminal (its name, on/off switch and screen size).
+  local function resetToTemplate(p)
+    local keep = { label = p.label, enabled = p.enabled, screen = p.screen }
+    for k in pairs(p) do p[k] = nil end
+    for k, v in pairs(config.copy(hudCfg.default)) do p[k] = v end
+    for k, v in pairs(keep) do p[k] = v end
+  end
+
+  -- An edit that changes several terminals at once: save + restart.
+  local function structuralEdit(message)
+    pending = pending or {}
+    pending.at = computer.uptime() + APPLY_DELAY
+    pending.rebuild = true
+    ui.message = message
     invalidate()
   end
 
@@ -177,11 +246,21 @@ function M.start(ctx, cfg)
     end
   end)
 
-  ctx:on("hud_screen", function(_, w, h)
-    hudCfg.screen = { w = w, h = h }
-    invalidate()
-    app:redraw()
+  ctx:on("hud_screen", function(_, address, w, h)
+    if hudCfg and hudCfg.profiles[address] then
+      hudCfg.profiles[address].screen = { w = w, h = h }
+      invalidate()
+      app:redraw()
+    end
   end)
+
+  -- Pick up profiles the HUD created for new terminals (and screen sizes
+  -- it learned) -- but never while our own edits are unsaved.
+  local function reload()
+    if pending then return end
+    local fresh = config.load("hud", hudApp.defaults)
+    if fresh then hudCfg = hudApp.normalize(fresh) end
+  end
 
   ctx:on("energy_update", function()
     if ui.tab == 2 then
@@ -193,18 +272,19 @@ function M.start(ctx, cfg)
   -- ----------------------------------------------------------- HUD tab --
 
   local function previewModel()
-    local heights = hudApp.heights(hudCfg)
-    local pos = hudApp.layout(hudCfg, heights, hudCfg.screen)
+    local prof = current()
+    local heights = hudApp.heights(prof)
+    local pos = hudApp.layout(prof, heights, prof.screen)
     local panels = {}
     if pos.lsc then
       table.insert(panels, { label = "LSC", x = pos.lsc[1], y = pos.lsc[2],
-        w = hudCfg.width, h = heights.lsc, color = 0x2B5797 })
+        w = prof.width, h = heights.lsc, color = 0x2B5797 })
     end
     if pos.crafting then
       table.insert(panels, { label = "Craft", x = pos.crafting[1], y = pos.crafting[2],
-        w = hudCfg.width, h = heights.crafting, color = 0x6B4C9A })
+        w = prof.width, h = heights.crafting, color = 0x6B4C9A })
     end
-    return { screen = hudCfg.screen, panels = panels }
+    return { screen = prof.screen, panels = panels }
   end
 
   local function add(widget) return root:add(widget) end
@@ -267,7 +347,16 @@ function M.start(ctx, cfg)
       end
     end
 
-    local l, c = hudCfg.lsc, hudCfg.crafting
+    local prof = current()
+    local isTemplate = ui.profile == "default"
+    add(widgets.Cycle.new({ x = 1, y = 3, w = 52, h = 1, label = "Profile", options = profileIds(),
+      value = ui.profile, format = profileName,
+      onChange = function(id) ui.profile = id; invalidate() end }))
+    if not isTemplate then
+      toggle(55, 3, 24, "HUD on this terminal", prof, "enabled", true)
+    end
+
+    local l, c = prof.lsc, prof.crafting
     local colW = 38
     local lx, cx = 1, 41
 
@@ -294,19 +383,36 @@ function M.start(ctx, cfg)
     stepper(cx, 10, colW, "Offset Y", c, "y", false, { min = 0, max = 4000, disabled = not free })
 
     label(lx, 13, "General", theme.accent)
-    stepper(lx, 14, colW, "Width", hudCfg, "width", true, { min = 120, max = 600 })
-    cycle(lx, 15, colW, "Text size", { 0.75, 1, 1.25, 1.5, 2 }, hudCfg, "textScale", true, false,
+    stepper(lx, 14, colW, "Width", prof, "width", true, { min = 120, max = 600 })
+    cycle(lx, 15, colW, "Text size", { 0.75, 1, 1.25, 1.5, 2 }, prof, "textScale", true, false,
       function(v) return string.format("%gx", v) end)
     label(lx, 16, string.format("Screen %dx%d px (from the glasses)",
-      hudCfg.screen.w, hudCfg.screen.h), theme.textDim, colW)
-    label(lx, 17, "Moves apply live; other edits", theme.textDim, colW)
-    label(lx, 18, "restart the HUD after a moment.", theme.textDim, colW)
+      prof.screen.w, prof.screen.h), theme.textDim, colW)
+    label(lx, 17, "Moves apply live, rest restarts HUD", theme.textDim, colW)
+    if isTemplate then
+      add(widgets.Button.new({ x = lx, y = 19, text = "Apply to all terminals", onClick = function()
+        for _, p in pairs(hudCfg.profiles) do resetToTemplate(p) end
+        structuralEdit("template applied to every terminal")
+      end }))
+    else
+      add(widgets.Button.new({ x = lx, y = 19, text = "Reset to template", onClick = function()
+        resetToTemplate(prof)
+        structuralEdit("profile reset to the template")
+      end }))
+      if not connectedTerminals()[ui.profile] then
+        add(widgets.Button.new({ x = lx + 20, y = 19, text = "Forget", onClick = function()
+          hudCfg.profiles[ui.profile] = nil
+          ui.profile = "default"
+          structuralEdit("offline profile removed")
+        end }))
+      end
+    end
 
     -- to-scale preview in the right column, as large as the space allows
     -- (text cells are about twice as tall as wide)
     local px, py = cx, 12
     local maxW, maxH = W - px - 1, H - py - 1
-    local aspect = hudCfg.screen.w / hudCfg.screen.h
+    local aspect = prof.screen.w / prof.screen.h
     local previewW = math.min(maxW, math.floor(maxH * 2 * aspect))
     local previewH = math.min(maxH, math.floor(previewW / (2 * aspect) + 0.5) + 2)
     if previewW >= 10 and previewH >= 4 then
@@ -432,7 +538,10 @@ function M.start(ctx, cfg)
     root = root,
     background = theme.background,
     tickInterval = 2, -- refreshes the HUD status line
-    onTick = invalidate,
+    onTick = function()
+      reload()
+      invalidate()
+    end,
     gpu = cfg.gpu or nil,
     screen = cfg.screen or nil,
   })
