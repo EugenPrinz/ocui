@@ -1377,8 +1377,8 @@ do
   local events = factory.script(
     false, snap("start"),
     factory.typeText("h"), factory.press("f5"), false, false, snap("hudStarted"),
-    factory.press("up"), factory.press("up"), factory.press("f6"), snap("selfStop"),     -- taskmgr itself
-    factory.press("down"), factory.press("down"), factory.press("f6"), false, snap("hudStopped"),
+    factory.press("home"), factory.press("f6"), snap("selfStop"),                        -- taskmgr itself
+    factory.typeText("h"), factory.press("f6"), false, snap("hudStopped"),
     factory.press("f5"), false, false,
     factory.press("f2"), false, snap("services"),
     factory.press("f3"), false, snap("system"),
@@ -1756,6 +1756,113 @@ do
   check(seen.endFrame and findText(seen.endFrame, "hijEND"), "End scrolled to the end of a 303-char line")
   eq(seen.tabCol, 4, "tab counts as one character")
   check(seen.tabFrame and findText(seen.tabFrame, "  x y"), "tabs shown as spaces to the next stop")
+end
+
+-- ===================================================== explorer, desktop ==
+
+local DESK_FILES = { ["/home/demo.lua"] = "print('hi')\n", ["/home/sub/x.txt"] = "x", ["/home/.hidden"] = "h" }
+
+local function copyFiles(t)
+  local out = {}
+  for k, v in pairs(t) do out[k] = v end
+  return out
+end
+
+-- Script entry: touch the first occurrence of `text` on screen-1.
+local function touchOn(envRef, text, button)
+  return function()
+    local x, y = findText(envRef().gpu._screen(), text)
+    if not x then return false end
+    return { "touch", "screen-1", x, y, button or 0, "player" }
+  end
+end
+
+section("explorer: browse, create, copy, rename, delete, edit, run")
+do
+  local env
+  local seen = {}
+  local function snap(key) return function() seen[key] = screenOf(env); return false end end
+  local function sel() return package.loaded["ocui.apps.explorer"].list:selectedItem() end
+  local events = factory.script(false, snap("start"),
+    factory.press("f7"), factory.typeText("newdir"), factory.press("enter"),
+    function() seen.mkdirSel = sel() and sel().name; return false end,
+    factory.press("end"),                                                  -- demo.lua (last)
+    factory.press("f5"), factory.press("enter"),                           -- copy_of_demo.lua
+    factory.press("ctrl+home"), factory.typeText("c"),                     -- type-ahead to the copy
+    factory.press("f2"), factory.press("ctrl+u"), factory.typeText("renamed.lua"), factory.press("enter"),
+    function() seen.renamedSel = sel() and sel().name; return false end,
+    factory.press("f8"), factory.press("enter"),                           -- delete renamed.lua
+    factory.typeText("s"), factory.press("enter"),                         -- into sub/
+    snap("sub"),
+    factory.press("back"),
+    function() seen.backSel = sel() and sel().name; return false end,
+    factory.press("ctrl+h"), snap("hidden"),
+    factory.press("end"),                                                  -- demo.lua (files: .hidden, demo.lua)
+    function() seen.editTarget = sel() and sel().name; return false end,
+    factory.press("f4"),
+    factory.press("ctrl+enter"), { "key_down", "kb-1", 32, 57, "player" },
+    factory.press("ctrl+q"))
+  env = factory.new({ maxW = 100, maxH = 25, events = events, maxPulls = #events + 5,
+    endSignal = { "interrupted", 0 }, files = copyFiles(DESK_FILES) })
+  local _, _, ok, err = captureOutput(function() return runApp("apps/explorer.lua", env, "/home") end)
+  check(ok, "explorer ran: " .. tostring(err))
+  check(seen.start and findText(seen.start, "sub/") and findText(seen.start, "demo.lua"), "lists the directory")
+  check(seen.start and not findText(seen.start, ".hidden"), "hidden files hidden by default")
+  eq(seen.mkdirSel, "newdir", "F7 created and selected the directory")
+  check(env.filesystem.isDirectory("/home/newdir"), "directory exists")
+  eq(seen.renamedSel, "renamed.lua", "F5 copy then F2 rename")
+  check(env.files["/home/renamed.lua"] == nil, "F8 deleted it")
+  eq(env.files["/home/demo.lua"], "print('hi')\n", "original untouched")
+  check(seen.sub and findText(seen.sub, "/home/sub") and findText(seen.sub, "x.txt"), "Enter opened sub/")
+  eq(seen.backSel, "sub", "Backspace went up and selected the directory it came from")
+  check(seen.hidden and findText(seen.hidden, ".hidden"), "Ctrl+H shows hidden files")
+  local ned, run = env.executed[1], env.executed[2]
+  check(ned and ned.cmd == "ned" and ned.args[1] == "/home/" .. tostring(seen.editTarget),
+    "F4 edits in ned (standalone: as a program)")
+  eq(run and run.cmd, "/home/" .. tostring(seen.editTarget), "Ctrl+Enter runs the file")
+end
+
+section("desktop: home screen, windows, taskbar, start menu")
+do
+  local env
+  local envRef = function() return env end
+  local seen = {}
+  local function snap(key) return function() seen[key] = screenOf(env); return false end end
+  local function budget(key) return function() seen[key] = env.gpu._budget(); env.gpu._resetBudget(); return false end end
+  local function desk() return package.loaded["ocui.apps.desktop"].desk end
+  local events = factory.script(false, snap("home"),
+    factory.press("f12"), snap("start"), factory.press("escape"), snap("startClosed"),
+    touchOn(envRef, "explorer"), false, snap("explorer"),
+    factory.press("end"), factory.press("enter"), false, snap("ned"),
+    budget("before"), factory.typeText("x"), budget("typing"),
+    factory.press("ctrl+tab"), snap("switched"),
+    function() seen.windows = #desk().windows; return false end,
+    factory.press("ctrl+tab"), factory.press("ctrl+q"),                     -- ned: unsaved -> dialog
+    factory.press("right"), factory.press("enter"),                         -- Don't save
+    function() seen.afterNed = #desk().windows; return false end, snap("afterNedScreen"),
+    factory.press("ctrl+d"), snap("home2"),
+    factory.press("f12"), factory.press("up"), factory.press("enter"), factory.press("enter"))
+  env = factory.new({ maxW = 120, maxH = 30, events = events, maxPulls = #events + 5,
+    endSignal = { "interrupted", 0 }, files = copyFiles(DESK_FILES) })
+  local ok, err = runApp("apps/desktop.lua", env)
+  check(ok, "desktop ran: " .. tostring(err))
+  check(seen.home and findText(seen.home, "ocui desktop") and findText(seen.home, "taskmgr")
+    and findText(seen.home, "explorer"), "home screen tiles")
+  check(seen.home and findText(seen.home, "Start"), "taskbar")
+  check(seen.start and findText(seen.start, "Exit desktop") and findText(seen.start, "OpenOS shell"), "F12 start menu")
+  check(seen.start and findText(seen.start, "Start"), "the start menu leaves the Start button visible")
+  check(seen.startClosed and not findText(seen.startClosed, "Exit desktop"), "Escape closed it")
+  check(seen.explorer and findText(seen.explorer, "/home") and findText(seen.explorer, "Files"),
+    "explorer opened in a window, listed on the taskbar")
+  check(seen.ned and findText(seen.ned, "ned  /home/demo.lua"), "Enter on a file opened it in a ned window")
+  check(seen.typing and seen.typing < 0.3, "typing in a window repaints little (" .. tostring(seen.typing) .. ")")
+  check(seen.switched and findText(seen.switched, "Enter Open"), "Ctrl+Tab back to the explorer window")
+  eq(seen.windows, 2, "two windows")
+  eq(seen.afterNed, 1, "closing ned removed its window")
+  check(seen.afterNedScreen and findText(seen.afterNedScreen, "Enter Open"), "the other window shown after closing one")
+  check(seen.home2 and findText(seen.home2, "ocui desktop"), "Ctrl+D home screen")
+  check(env.pulls() < #events + 5, "Exit desktop from the start menu")
+  eq(env.files["/home/demo.lua"], "print('hi')\n", "Don't save left the file alone")
 end
 
 section("install.lua")

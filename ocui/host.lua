@@ -25,6 +25,12 @@
 -- Keys: key_down from a keyboard attached to this screen goes to the
 -- focused widget's onKey(ev) (see ocui.keys), then bubbles up its parents,
 -- then the view's onKey and key bindings; an unhandled Tab moves focus.
+--
+-- Windows: a host can also be a *window* inside another host (the
+-- desktop): attach(parent, viewport) makes it draw into the parent's
+-- screen at the viewport's offset, and the parent routes input to its
+-- active window (setWindow). Apps get a window or a screen of their own
+-- through Host.forApp(ctx, opts), so the same app runs either way.
 
 local component = require("component")
 
@@ -182,6 +188,50 @@ end
 
 function Host:ownsKeyboard(address)
   return self.keyboards == nil or self.keyboards[address] == true
+end
+
+-- --------------------------------------------------------------- windows --
+
+-- The host a pool app should draw on: a window of the pool's display (the
+-- desktop) if one runs and the app wasn't given a GPU/screen of its own,
+-- else a host mounted on its own screen.
+function Host.forApp(ctx, opts)
+  opts = opts or {}
+  local display = ctx.display and ctx:display()
+  if display and not opts.gpu and not opts.screen then
+    return display.openWindow(ctx, opts)
+  end
+  local host = Host.new(opts)
+  host:mount(ctx)
+  return host
+end
+
+-- Makes this host a window of `parent` covering `viewport` (x, y, w, h).
+function Host:attach(parent, viewport)
+  self.parent = parent
+  self.gpu = parent.gpu
+  self.ox, self.oy = viewport.x, viewport.y
+  self.w, self.h = viewport.w, viewport.h
+  self.stats = parent.stats
+  self.mounted = true
+  self.active = false
+  for _, view in ipairs(self.views) do self:layoutView(view) end
+end
+
+-- Shows `win` (an attached host, or nil) in this host's screen; input
+-- inside its viewport goes to it.
+function Host:setWindow(win)
+  if self.window == win then return end
+  if self.window then self.window.active = false end
+  self.window = win
+  self.captureWindow = nil
+  if win then win.active = true end
+  self:damageAll()
+end
+
+function Host:containsPoint(x, y)
+  local ox, oy = self.ox or 0, self.oy or 0
+  return x >= ox and y >= oy and x < ox + self.w and y < oy + self.h
 end
 
 -- ------------------------------------------------------------------ views --
@@ -398,6 +448,12 @@ end
 
 function Host:pointerDown(x, y, button)
   setFocusVisible(self, false)
+  local win = self.window
+  if win and #self.overlays == 0 and win:containsPoint(x, y) then
+    self.captureWindow = win
+    return win:pointerDown(x - win.ox, y - win.oy, button)
+  end
+  self.captureWindow = nil
   self.touchTarget = nil
   self.capture = nil
   local root = self:pointerRoot(x, y, button, true)
@@ -418,6 +474,11 @@ end
 
 -- Drag/drop go to the widget that took the touch.
 function Host:pointerMove(method, x, y, button)
+  local win = self.captureWindow
+  if win then
+    if method == "onDrop" then self.captureWindow = nil end
+    return win:pointerMove(method, x - win.ox, y - win.oy, button)
+  end
   local target = self.capture
   if method == "onDrop" then self.capture = nil end
   if not target or target:getHost() ~= self then return end
@@ -428,6 +489,10 @@ function Host:pointerMove(method, x, y, button)
 end
 
 function Host:scroll(x, y, dir)
+  local win = self.window
+  if win and #self.overlays == 0 and win:containsPoint(x, y) then
+    return win:scroll(x - win.ox, y - win.oy, dir)
+  end
   local root = self:pointerRoot(x, y, nil, false)
   if not root then return end
   if root:onScroll(x - root.x, y - root.y, dir) and self.opts.redrawOnInput then
@@ -437,9 +502,18 @@ end
 
 function Host:keyDown(char, code)
   local mod = keys.MODIFIERS[code]
+  local win = self.window
   if mod then
     self.mods[mod] = true
+    if win then win:keyDown(char, code) end
     return
+  end
+  if win and #self.overlays == 0 then
+    -- the desktop's own global keys first, then the window
+    local ev = keys.event(char, code, self.mods)
+    local binding = self.bindings[ev.combo]
+    if binding then return binding(ev) end
+    return win:keyDown(char, code)
   end
   setFocusVisible(self, true)
   if self:dispatchKey(keys.event(char, code, self.mods)) and self.opts.redrawOnInput then
@@ -450,6 +524,7 @@ end
 function Host:keyUp(code)
   local mod = keys.MODIFIERS[code]
   if mod then self.mods[mod] = false end
+  if self.window then self.window:keyUp(code) end
 end
 
 -- Focused widget -> its parents -> overlay/view handlers -> bindings ->
@@ -485,6 +560,7 @@ function Host:dispatchKey(ev)
 end
 
 function Host:paste(text)
+  if self.window and #self.overlays == 0 then return self.window:paste(text) end
   local w = self.focused
   while w do
     if w:onPaste(text) then return true end
@@ -506,6 +582,14 @@ end
 
 -- Marks a screen rectangle (0-based) for repainting on the next frame.
 function Host:damage(x, y, w, h)
+  if self.parent then
+    -- a window: only the shown one repaints, in its parent's coordinates
+    if not self.active then return end
+    local x0, y0 = math.max(x, 0), math.max(y, 0)
+    local x1, y1 = math.min(x + w, self.w), math.min(y + h, self.h)
+    if x1 <= x0 or y1 <= y0 then return end
+    return self.parent:damage(x0 + self.ox, y0 + self.oy, x1 - x0, y1 - y0)
+  end
   if not self.w or self.rendering then return end
   local x0, y0 = math.max(x, 0), math.max(y, 0)
   local x1, y1 = math.min(x + w, self.w), math.min(y + h, self.h)
@@ -539,6 +623,7 @@ end
 -- Repaints everything now.
 function Host:redraw()
   self:damageAll()
+  if self.parent then return self.parent:flush() end
   self:flush()
 end
 
@@ -547,22 +632,37 @@ function Host:render(rect)
   local canvas = Canvas.new(self.gpu, 0, 0, self.w, self.h, rect.x, rect.y, rect.w, rect.h, {})
   canvas:fillRect(rect.x, rect.y, rect.w, rect.h, self.background)
   canvas.bg = self.background
+  self:renderLayers(canvas)
+end
+
+-- Draws the view, the active window (if any) and the overlays onto
+-- `canvas` (screen coordinates), at this host's offset.
+function Host:renderLayers(canvas)
+  local ox, oy = self.ox or 0, self.oy or 0
+  if self.parent then
+    canvas:fillRect(ox, oy, self.w, self.h, self.background)
+    canvas.bg = self.background
+  end
   local view = self:currentView()
   if view and view.root.visible then
     local root = view.root
-    root:draw(canvas:sub(root.x, root.y, root.w, root.h))
+    if canvas:intersects(ox + root.x, oy + root.y, root.w, root.h) then
+      root:draw(canvas:sub(ox + root.x, oy + root.y, root.w, root.h))
+    end
   end
+  if self.window then self.window:renderLayers(canvas) end
   for _, entry in ipairs(self.overlays) do
     local w = entry.widget
+    local x, y = ox + w.x, oy + w.y
     if entry.shadow then
-      canvas:fillRect(w.x + 1, w.y + w.h, w.w, 1, 0x000000)
-      canvas:fillRect(w.x + w.w, w.y + 1, 1, w.h, 0x000000)
+      canvas:fillRect(x + 1, y + w.h, w.w, 1, 0x000000)
+      canvas:fillRect(x + w.w, y + 1, 1, w.h, 0x000000)
     end
-    if canvas:intersects(w.x, w.y, w.w, w.h) then
-      local sub = canvas:sub(w.x, w.y, w.w, w.h)
-      w:draw(sub)
+    if canvas:intersects(x, y, w.w, w.h) then
+      w:draw(canvas:sub(x, y, w.w, w.h))
     end
   end
+  canvas.bg = self.background
 end
 
 -- Copies one changed rectangle from the back buffer to the screen through
@@ -632,6 +732,7 @@ end
 -- was. Returns xpcall-style ok, results... Meant for a host on the shell's
 -- own screen (a foreground app); blocks the loop while fn runs.
 function Host:suspend(fn, ...)
+  if self.parent then return self.parent:suspend(fn, ...) end
   assert(self.mounted, "host is not mounted")
   self.suspended = true
   self:releaseScreen()

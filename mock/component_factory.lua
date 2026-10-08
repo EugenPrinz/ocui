@@ -713,7 +713,8 @@ function M.new(opts)
   end
   function filesystem.list(dir)
     if not dir:match("ocui/apps$") then return fsList(dir) end
-    local names = { "dashboard.lua", "hud.lua", "hudctl.lua", "taskmgr.lua", "uidemo.lua" }
+    local names = { "dashboard.lua", "desktop.lua", "explorer.lua", "hud.lua", "hudctl.lua", "ned.lua",
+      "render3d.lua", "taskmgr.lua", "uidemo.lua" }
     for _, n in ipairs(extraApps) do table.insert(names, n .. ".lua") end
     local i = 0
     return function() i = i + 1; return names[i] end

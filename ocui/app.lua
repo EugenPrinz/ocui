@@ -46,14 +46,14 @@ end
 -- Claims the GPU and screen, sets up the display, registers the refresh
 -- task and input handlers, and restores everything when the app stops.
 function App:mount(ctx)
-  local host = Host.new({
+  local host = Host.forApp(ctx, {
     gpu = self.opts.gpu,
     screen = self.opts.screen,
     background = self.background,
     redrawOnInput = not self.partial,
+    title = self.opts.title,
   })
   self.host = host
-  host:mount(ctx)
   self.view = host:setView({ root = self.root, bindings = self.opts.bindings, onKey = self.opts.onKey })
   self.gpu, self.screenAddress, self.w, self.h = host.gpu, host.screenAddress, host.w, host.h
 

@@ -19,6 +19,8 @@ component API used was checked against those exact source tags.
 | `hud` | On AR glasses: LSC charge %, stored/capacity, avg IN/OUT, a scrolling net-flow graph (green = charging, red = draining), time to full/empty, maintenance & wireless flags; below it the busy AE2 crafting CPUs with progress bar, % and ETA | Glasses Terminal + linked AR Glasses; Adapter on the LSC controller; Adapter on an ME Interface/Controller |
 | `dashboard` | On a screen: one panel per crafting CPU with output, progress %, ETA | T2+ GPU and screen; Adapter on an ME Interface/Controller |
 | `taskmgr` | On a screen: task manager — every app with state, uptime, restarts, CPU time and errors (start/stop/restart with F5/F6/F7 or Enter), the shared services and who uses them, system info (memory and energy with a memory chart, components), the pool log. Controls the background pool if one runs, else a local pool with every installed app | T3 GPU and screen, a keyboard on the screen |
+| `desktop` | On a screen: a desktop — every app opens as a full-screen window above a taskbar (start button, one button per window, clock); the home screen shows all installed apps as tiles. F12 start menu, Ctrl+Tab switch windows, Ctrl+D home screen, right click a taskbar button to close/restart; the start menu also opens an OpenOS shell (`exit` comes back) | T3 GPU and screen, a keyboard on the screen |
+| `explorer` | On a screen: single-panel file manager — name/size/date, Enter opens a directory or edits a file in `ned` (on the desktop: in the ned window), Ctrl+Enter runs it, F2/F6 rename/move, F5 copy (directories too), F7 new directory, F8 delete, Ctrl+N new file, Ctrl+H hidden files, right-click menu. `explorer [dir]` | T3 GPU and screen, a keyboard on the screen |
 | `ned` | On a screen: text editor in the spirit of nano — Lua syntax highlighting (long comments/strings across lines included), line numbers, selection with Shift or the mouse, copy/cut/paste, nano's Ctrl+K/Ctrl+U, undo/redo, find/replace, go to line, indent/unindent, F5 runs the file and comes back. `ned [file]`; F1 lists the keys | T3 GPU and screen, a keyboard on the screen |
 | `render3d` | On a screen: a small 3D renderer as a stress test — cube, pyramid, octahedron or torus, flat-shaded and/or wireframe, on a 160x100 half-block pixel view; shows FPS, CPU time per frame and the estimated GPU budget per frame. 1-4 shape, M mode, Space pause, arrows spin, +/- or wheel zoom, drag to rotate, Q quits | T3 GPU and screen |
 | `uidemo` | On a screen: a tour of the screen widgets — menu bar, list with columns, text fields, dialogs, split panes, status bar, running an OpenOS program and coming back. Keyboard and touch; Ctrl+Q quits | T3 GPU and screen, a keyboard on the screen |
@@ -192,6 +194,8 @@ ocui/                 the library — copy this whole folder to /lib/ocui
     taskmgr.lua         app: task manager
     render3d.lua        app: 3D renderer demo
     ned.lua             app: text editor
+    explorer.lua        app: file manager
+    desktop.lua         app: desktop (windows + taskbar)
     uidemo.lua          app: widget demo
 
 apps/                  programs — copy to /home or /usr/bin
@@ -202,6 +206,8 @@ apps/                  programs — copy to /home or /usr/bin
   taskmgr.lua           task manager (background pool, or a local one)
   render3d.lua          shortcut: 3D renderer demo
   ned.lua               the editor: `ned [file]`
+  explorer.lua          the file manager: `explorer [dir]`
+  desktop.lua           the desktop, with every installed app
   uidemo.lua            shortcut: widget demo
 
 install.lua            in-game installer/updater (Internet Card)
@@ -427,6 +433,13 @@ return {
 - **Overlays.** `Dialog.message/confirm/prompt/open` and `Menu.open` /
   `MenuBar` are modal overlays; Escape closes them, a touch outside closes
   a menu. `host:push(view)` / `host:pop()` stack full-screen views.
+  (In-game, Escape usually closes OpenComputers' screen GUI itself, so
+  every dialog also has a Cancel button.)
+- **Windows.** Get the host with `Host.forApp(ctx, opts)` instead of
+  `Host.new` + `mount`: on the desktop the app gets a full-screen window,
+  otherwise a screen of its own — the app code is the same. Quit with
+  `ctx:stop()` (not `ctx:quitPool()`), so on the desktop only the window
+  closes.
 - **Running a program.** `host:suspend(fn)` gives the screen back to
   OpenOS while `fn` runs (e.g. `shell.execute("edit", nil, path)`) and
   restores the UI afterwards — for a foreground app on the shell's screen.

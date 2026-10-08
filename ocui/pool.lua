@@ -26,6 +26,7 @@
 --   ctx:use(service)         shared service API (see below)
 --   ctx:log(fmt, ...)        line in /tmp/ocpool.log
 --   ctx:stop()               stop this app
+--   ctx:display()            the desktop apps open windows on, or nil
 --   ctx:apps()               status of every app (like `ocpool status`)
 --   ctx:startApp(name) / stopApp(name) / restartApp(name)
 --   ctx.sleep(s), ctx.yield()
@@ -266,6 +267,10 @@ local function newContext(pool, rec, cfg)
   function ctx:services() return pool:serviceStatus() end
   -- Stops the whole pool (every app), as `ocpool quit` would.
   function ctx:quitPool() pool.loop:stop() end
+  -- The desktop (if one runs in this pool) that screen apps open their
+  -- windows on; see Host.forApp.
+  function ctx:display() return pool.display end
+  function ctx:setDisplay(display) pool.display = display end
   function ctx:startApp(name) return pool:start(name) end
   function ctx:stopApp(name) return pool:stop(name) end
   function ctx:restartApp(name) return pool:restart(name) end

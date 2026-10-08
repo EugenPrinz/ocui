@@ -97,8 +97,8 @@ end
 
 function M.start(ctx, cfg)
   local backend = M.remoteMode and remoteBackend(ctx) or localBackend(ctx)
-  local host = Host.new({ gpu = cfg.gpu, screen = cfg.screen, background = theme.background })
-  host:mount(ctx)
+  local host = Host.forApp(ctx, { gpu = cfg.gpu, screen = cfg.screen, background = theme.background,
+    title = "Task manager" })
   M.host = host
 
   local root = widgets.VBox.new({})
@@ -398,6 +398,7 @@ function M.start(ctx, cfg)
   status:setHints(HINTS[1])
 
   local function quit()
+    if ctx:display() then return ctx:stop() end -- a window on the desktop
     if backend.remote then return ctx:quitPool() end
     if ctx.background then return ctx:stop() end
     local others = {}

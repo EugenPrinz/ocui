@@ -32,8 +32,7 @@ local function sampleItems()
 end
 
 function M.start(ctx)
-  local host = Host.new({ background = theme.background })
-  host:mount(ctx)
+  local host = Host.forApp(ctx, { background = theme.background, title = "UI demo" })
 
   local items = sampleItems()
   local root = widgets.VBox.new({})

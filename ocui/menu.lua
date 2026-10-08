@@ -6,7 +6,7 @@
 --     { label = "Rename", key = "F2", action = ..., disabled = false },
 --     { separator = true },
 --     { label = "Quit", key = "^Q", action = ... },
---   }, { onClose = fn })
+--   }, { onClose = fn, shadow = false })
 --
 --   local bar = MenuBar.new({ x = 0, y = 0, menus = {
 --     { title = "File", items = { ... } },
@@ -146,6 +146,7 @@ function M.open(host, x, y, items, opts)
   host:openOverlay(popup, {
     focus = popup,
     onOutside = function() popup:close() end,
+    shadow = (opts or {}).shadow,
   })
   return popup
 end

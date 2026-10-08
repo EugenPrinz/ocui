@@ -23,6 +23,7 @@ local pool = Pool.new({ logPath = background and "/tmp/taskmgr.log" or nil })
 pool:register(taskmgr)
 if not background then pool:registerAvailable() end
 pool:run({ "taskmgr" })
+taskmgr.remoteMode = false -- the module stays loaded; don't leak the mode
 
 for _, app in ipairs(pool:status()) do
   if app.state == "failed" and app.name == "taskmgr" then

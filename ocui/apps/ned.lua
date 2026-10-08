@@ -39,11 +39,12 @@ Move     arrows, Home/End, PgUp/PgDn, Ctrl+Home/End, Ctrl+Left/Right;
 Run      F5 saves and runs the file, then comes back to the editor]]
 
 function M.start(ctx, cfg)
-  local host = Host.new({ gpu = cfg.gpu, screen = cfg.screen, background = theme.background })
-  host:mount(ctx)
+  local host = Host.forApp(ctx, { gpu = cfg.gpu, screen = cfg.screen, background = theme.background,
+    title = "ned" })
   M.host = host
 
   local state = { path = M.path, search = "" }
+  M.path = nil -- consumed: a later start doesn't reopen it
   local root = widgets.VBox.new({})
   local titleBar = root:add(widgets.HBox.new({ h = 1, bg = theme.header }))
   local title = titleBar:add(widgets.Label.new({ fg = theme.text }))
@@ -223,6 +224,13 @@ function M.start(ctx, cfg)
       ["ctrl+q"] = quit,
     },
   })
+  -- another app (the file manager) asks to open a file here
+  ctx:on("ned_open", function(_, path)
+    local display = ctx:display()
+    if display then display.activate(ctx.name) end
+    confirmDiscard(function() load(path) end)
+  end)
+
   load(state.path)
   editor:focus()
   if not state.path then message("New file -- Ctrl+S asks for a name") end

@@ -209,8 +209,7 @@ end
 -- ------------------------------------------------------------------- app --
 
 function M.start(ctx, cfg)
-  local host = Host.new({ gpu = cfg.gpu, screen = cfg.screen, background = 0x000000 })
-  host:mount(ctx)
+  local host = Host.forApp(ctx, { gpu = cfg.gpu, screen = cfg.screen, background = 0x000000, title = "3D" })
   M.host = host
 
   local state = {
