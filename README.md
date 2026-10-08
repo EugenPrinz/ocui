@@ -20,6 +20,7 @@ component API used was checked against those exact source tags.
 | `dashboard` | On a screen: one panel per crafting CPU with output, progress %, ETA | T2+ GPU and screen; Adapter on an ME Interface/Controller |
 | `taskmgr` | On a screen: task manager — every app with state, uptime, restarts, CPU time and errors (start/stop/restart with F5/F6/F7 or Enter), the shared services and who uses them, system info (memory and energy with a memory chart, components), the pool log. Controls the background pool if one runs, else a local pool with every installed app | T3 GPU and screen, a keyboard on the screen |
 | `desktop` | On a screen: a desktop — every app opens as a full-screen window above a taskbar (start button, one button per window, clock); the home screen shows all installed apps as tiles. F12 start menu, Ctrl+Tab switch windows, Ctrl+D home screen, right click a taskbar button to close/restart; the start menu also opens an OpenOS shell (`exit` comes back) | T3 GPU and screen, a keyboard on the screen |
+| `terminal` | On a screen / desktop window: the OpenOS shell inside a window — `sh`, `ls`, `edit`, `cat`, the ocui CLI tools run there while every other window and the HUD keep running; `exit` closes it. The desktop's own keys (F12, Ctrl+Tab, Ctrl+D) still work. Programs that draw on `component.gpu` directly (not through the terminal) still draw on the real screen | a desktop (or a screen of its own) |
 | `explorer` | On a screen: single-panel file manager — name/size/date, Enter opens a directory or edits a file in `ned` (on the desktop: in the ned window), Ctrl+Enter runs it, F2/F6 rename/move, F5 copy (directories too), F7 new directory, F8 delete, Ctrl+N new file, Ctrl+H hidden files, right-click menu. `explorer [dir]` | T3 GPU and screen, a keyboard on the screen |
 | `ned` | On a screen: text editor in the spirit of nano — Lua syntax highlighting (long comments/strings across lines included), line numbers, selection with Shift or the mouse, copy/cut/paste, nano's Ctrl+K/Ctrl+U, undo/redo, find/replace, go to line, indent/unindent, F5 runs the file and comes back. `ned [file]`; F1 lists the keys | T3 GPU and screen, a keyboard on the screen |
 | `render3d` | On a screen: a small 3D renderer as a stress test — cube, pyramid, octahedron or torus, flat-shaded and/or wireframe, on a 160x100 half-block pixel view; shows FPS, CPU time per frame and the estimated GPU budget per frame. 1-4 shape, M mode, Space pause, arrows spin, +/- or wheel zoom, drag to rotate, Q quits | T3 GPU and screen |
@@ -206,6 +207,9 @@ ocui/                 the library — copy this whole folder to /lib/ocui
   dialog.lua            screen: message / confirm / prompt dialogs
   menu.lua              screen: pop-up menus, MenuBar
   pixels.lua            screen: PixelView (half-block pixels, lines, triangles)
+  vgpu.lua              screen: virtual GPU (a character grid) for terminals
+  terminal.lua          screen: Terminal widget -- OpenOS programs in a
+                        window (term.internal.open + virtual GPU/keyboard)
   session.lua           boot session: splash, background pool, desktop,
                         crash screen, shell
   textbuffer.lua        text: lines + UTF-8 positions, undo/redo, search
@@ -228,6 +232,7 @@ ocui/                 the library — copy this whole folder to /lib/ocui
     ned.lua             app: text editor
     explorer.lua        app: file manager
     desktop.lua         app: desktop (windows + taskbar)
+    terminal.lua        app: OpenOS shell in a window
     uidemo.lua          app: widget demo
 
 apps/                  programs — copy to /home or /usr/bin
@@ -246,6 +251,8 @@ boot/99_ocui.lua       OpenOS boot script: $SHELL -> ocsession when on
   uidemo.lua            shortcut: widget demo
 
 install.lua            in-game installer/updater (Internet Card)
+manifest.lua           what install.lua installs: path, target, size, checksum
+tools/manifest.lua     regenerates manifest.lua (run before committing)
 
 mock/                  local test harness — never deployed in-game
   component_factory.lua  fake OpenOS (component/computer/event, gpu with
@@ -267,16 +274,23 @@ wget -f https://raw.githubusercontent.com/EugenPrinz/ocui/main/install.lua /tmp/
 
 The same two commands update an existing install. `install.lua`:
 
-- downloads every file first and writes nothing if any download fails,
-  so a dropped connection can't leave a mix of old and new versions;
-- puts the library into `/lib/ocui` and the programs into `/usr/bin`, so
-  `ocpool`, `hud`, `hudctl` and `ae2_dashboard` run from any directory;
+- reads `manifest.lua` (every file with its size and checksum) and
+  downloads only the files that are missing or differ from what you have
+  — an update after a small change fetches a file or two; `-f` downloads
+  everything;
+- checks every download against the manifest and writes nothing if any
+  download fails or doesn't match, so a dropped connection can't leave a
+  mix of old and new versions;
+- puts the library into `/lib/ocui`, the programs into `/usr/bin` (they
+  run from any directory) and the boot hook into `/boot`;
 - clears the cached `ocui` modules from memory;
 - never touches your settings in `/etc/ocui`.
 
 `/tmp/install.lua <branch|tag|commit>` installs a specific version.
-GitHub's raw files can lag a push by a few minutes. If a background pool
-is running, restart it afterwards with `ocpool quit && ocpool -b`.
+GitHub's raw files can lag a push by a few minutes (the installer then
+says a file doesn't match the manifest — just run it again a bit later).
+If a background pool is running, restart it afterwards with
+`ocpool quit && ocpool -b`.
 
 Without an Internet Card, copy `ocui/` to `/lib/ocui` and `apps/*.lua` to
 `/usr/bin` by any other means (floppy, …).

@@ -37,6 +37,7 @@ local function install(env)
   package.loaded["thread"] = env.thread
   package.loaded["shell"] = env.shell
   package.loaded["term"] = env.term
+  package.loaded["process"] = env.process
   for name in pairs(package.loaded) do
     if name:match("^ocui%.") then package.loaded[name] = nil end
   end
@@ -1252,6 +1253,7 @@ end
 local function runTree(build, events, opts)
   opts = opts or {}
   opts.events = events
+  opts.maxPulls = opts.maxPulls or (#events + 40) -- pushed signals are pulls too
   -- keyboard apps ignore Ctrl+C's "interrupted": end with a signal of our own
   opts.endSignal = { "test_end" }
   local env = factory.new(opts)
@@ -1999,34 +2001,125 @@ do
   eq(env2.executed[1] and env2.executed[1].cmd, "sh", "S: shell")
 end
 
-section("install.lua")
-do
-  local f = io.open(projectRoot .. "/install.lua", "rb")
-  local source = f:read("a")
-  f:close()
-  local listed = {}
-  for path in source:gmatch('{ "([^"]+)",') do listed[path] = true end
-  local git = io.popen('git -C "' .. projectRoot .. '" ls-files --cached --others --exclude-standard ocui apps boot')
-  local seen = 0
-  if git then
-    for line in git:lines() do
-      seen = seen + 1
-      check(listed[line], "installer includes " .. line)
-    end
-    git:close()
-  end
-  check(seen > 0, "git ls-files listed the deployable files")
+-- ========================================================== terminal ==
 
-  -- Runs install.lua against a fake internet serving this checkout;
-  -- downloading `failOn` raises like a 404 does in OpenOS.
-  local removedFiles
-  local function runInstall(failOn)
+section("vgpu: the virtual GPU grid")
+do
+  install(factory.new({}))
+  local VGpu = require("ocui.vgpu")
+  local g = VGpu.new(10, 4)
+  local damaged = {}
+  g.onDamage = function(x, y, w, h) damaged[#damaged + 1] = x .. "," .. y .. " " .. w .. "x" .. h end
+  g.setForeground(0xFF0000)
+  g.set(2, 1, "Привет")
+  local ch, fg = g.get(3, 1)
+  eq(ch, "р", "set writes characters, UTF-8 aware")
+  eq(fg, 0xFF0000, "with the current foreground")
+  eq(damaged[1], "1,0 6x1", "damage of a set, 0-based")
+  g.setBackground(0x0000FF)
+  g.fill(1, 2, 3, 2, "#")
+  local _, _, bg = g.get(2, 3)
+  eq(bg, 0x0000FF, "fill uses the background")
+  g.copy(1, 2, 3, 1, 5, 0)
+  eq((g.get(6, 2)), "#", "copy moves cells")
+  eq(select(1, g.getResolution()), 10, "resolution")
+  eq(g.setResolution(80, 25), false, "resolution can't be changed by programs")
+  g.setForeground(3, true)
+  eq(select(2, g.getForeground()), true, "palette colors")
+  g.resize(12, 5)
+  eq((g.get(3, 1)), "р", "resize keeps the content")
+  check(g.getScreen():match("^ocui%-vscreen"), "a virtual screen address")
+end
+
+section("terminal widget: keys go to its virtual keyboard")
+do
+  local env, out = runTree(function(host, _, o)
+    o.term = require("ocui.terminal").new({})
+    host:setView(o.term)
+    o.term:focus()
+    o.term.gpu = nil
+    o.f12 = 0
+    host:bind("f12", function() o.f12 = o.f12 + 1 end)
+    o.term:vgpu().set(1, 1, "hello from the shell")
+  end, factory.script(
+    false,
+    factory.typeText("ls"),
+    factory.press("ctrl+c"),
+    factory.press("f12"),
+    { "clipboard", "kb-1", "pasted", "player" }
+  ))
+  local kb = out.term.keyboard
+  local downs, ups, ctrl, paste = {}, 0, false, false
+  for _, sig in ipairs(env.pushed) do
+    if sig[2] == kb then
+      if sig[1] == "key_down" then downs[#downs + 1] = sig[3]; if sig[4] == 29 then ctrl = true end end
+      if sig[1] == "key_up" then ups = ups + 1 end
+      if sig[1] == "clipboard" then paste = sig[3] == "pasted" end
+    end
+  end
+  check(kb and kb:match("^ocui%-vkb"), "virtual keyboard address")
+  eq(downs[1], string.byte("l"), "typed characters forwarded")
+  eq(downs[2], string.byte("s"), "in order")
+  check(ctrl, "modifier keys forwarded too (Ctrl for Ctrl+C)")
+  check(ups >= 1, "key releases forwarded")
+  check(paste, "clipboard forwarded")
+  eq(out.f12, 1, "the host's own bindings still come first")
+  check(env.gpu._lastFrame():find("hello from the shell", 1, true), "the grid is drawn")
+end
+
+section("terminal app: the shell runs in a window on the desktop")
+do
+  local seen = {}
+  local env
+  local envRef = function() return env end
+  local events = factory.script(false,
+    touchOn(envRef, "terminal"), false, false, false, false,
+    function() seen.windows = #package.loaded["ocui.apps.desktop"].desk.windows; return false end,
+    factory.press("f12"), factory.press("up"), factory.press("enter"))
+  env = factory.new({ maxW = 100, maxH = 30, events = events, maxPulls = #events + 10,
+    endSignal = { "interrupted", 0 },
+    onExecute = function(cmd)
+      -- what OpenOS's shell would do: write through its terminal window
+      local window = require("process").info().data.window
+      window.gpu.set(1, 1, "$ " .. cmd .. " -- shell prompt in a window")
+      seen.keyboard = window.keyboard
+      return true
+    end })
+  local ok, err = runApp("apps/desktop.lua", env)
+  check(ok, "desktop ran: " .. tostring(err))
+  -- (the mock runs the thread at once, so the shell has already ended by
+  -- the next frame; drawing the grid is tested with the widget above)
+  eq(env.executed[1] and env.executed[1].cmd, "sh", "the terminal ran the shell")
+  check(seen.keyboard and seen.keyboard:match("^ocui%-vkb"), "its terminal reads the virtual keyboard")
+  eq(seen.windows, 0, "the shell ended: its window closed")
+  check(env.pulls() < #events + 10, "desktop exited")
+end
+
+section("install.lua + manifest")
+do
+  -- the manifest lists exactly the deployable files, with current checksums
+  local tool = dofile(projectRoot .. "/tools/manifest.lua")
+  local current = tool.entries(projectRoot)
+  check(#current > 0, "git ls-files listed the deployable files")
+  local f = io.open(projectRoot .. "/manifest.lua", "rb")
+  local manifestText = f:read("a")
+  f:close()
+  eq(tool.normalize(manifestText), tool.render(current),
+    "manifest.lua is up to date (run: lua tools/manifest.lua)")
+  local manifest = load(manifestText, "=manifest", "t", {})()
+
+  -- Runs install.lua against a fake internet serving this checkout (LF
+  -- text, as raw GitHub does). opts: failOn (404 for that file), corrupt
+  -- (serve a changed file), have (files already installed), args.
+  local function runInstall(opts)
+    opts = opts or {}
     local env = factory.new({})
-    local written = {}
+    local written, requests = {}, {}
     local realOpen, realExit = io.open, os.exit
     env.component.isAvailable = function(t) return t == "internet" end
     env.filesystem.path = function(p) return p:match("^(.*)/[^/]*$") end
     env.filesystem.makeDirectory = function() return true end
+    for path, text in pairs(opts.have or {}) do env.files[path] = text end
     -- leftovers of the removed `tube` player from an older install
     env.files["/usr/bin/tube.lua"] = "old"
     env.files["/lib/ocui/tubeproto.lua"] = "old"
@@ -2034,14 +2127,15 @@ do
       env.files[path] = nil
       return true
     end
-    removedFiles = env.files
     package.loaded.internet = {
       request = function(url)
         local rel = url:match("/main/(.+)$")
-        if rel == failOn then error("HTTP request failed: Not Found") end
+        requests[#requests + 1] = rel
+        if rel == opts.failOn then error("HTTP request failed: Not Found") end
         local src = realOpen(projectRoot .. "/" .. rel, "rb")
-        local body = src:read("a")
+        local body = tool.normalize(src:read("a"))
         src:close()
+        if rel == opts.corrupt then body = body .. "-- tampered\n" end
         local done = false
         return setmetatable({ response = function() return 200, "OK" end }, {
           __call = function()
@@ -2053,38 +2147,71 @@ do
       end,
     }
     io.open = function(path, mode)
-      if path:sub(1, 1) == "/" and mode == "w" then
-        written[path] = ""
-        return { write = function(_, s) written[path] = written[path] .. s end, close = function() end }
+      if path:sub(1, 1) == "/" then
+        if mode == "w" then
+          written[path] = ""
+          return { write = function(_, s) written[path] = written[path] .. s end, close = function() end }
+        end
+        local text = env.files[path]
+        if not text then return nil, "not found" end
+        return { read = function() return text end, close = function() end }
       end
       return realOpen(path, mode)
     end
     os.exit = function(code) error({ exitCode = code }, 0) end
-    local out, _, ok, err = captureOutput(function() return runApp("install.lua", env) end)
+    local out, _, ok, err = captureOutput(function()
+      return runApp("install.lua", env, table.unpack(opts.args or {}))
+    end)
     io.open, os.exit = realOpen, realExit
     package.loaded.internet = nil
-    return written, out, ok, err
+    local count = 0
+    for _ in pairs(written) do count = count + 1 end
+    return { written = written, count = count, out = out, ok = ok, err = err, requests = requests, files = env.files }
   end
 
-  local written, out, ok, err = runInstall(nil)
-  check(ok, "install ran: " .. tostring(type(err) == "table" and err.exitCode or err))
-  local count = 0
-  for _ in pairs(written) do count = count + 1 end
-  eq(count, seen, "every file written")
+  local r = runInstall()
+  check(r.ok, "install ran: " .. tostring(type(r.err) == "table" and r.err.exitCode or r.err))
+  eq(r.count, #manifest, "fresh install: every file written")
+  eq(r.requests[1], "manifest.lua", "manifest first")
   local src = io.open(projectRoot .. "/ocui/pool.lua", "rb")
-  local poolSource = src:read("a")
+  local poolSource = tool.normalize(src:read("a"))
   src:close()
-  eq(written["/lib/ocui/pool.lua"], poolSource, "library file copied byte for byte")
-  check(written["/usr/bin/ocpool.lua"], "programs go to /usr/bin")
-  check(out:find("installed to /lib/ocui"), "success message")
-  check(removedFiles["/usr/bin/tube.lua"] == nil and removedFiles["/lib/ocui/tubeproto.lua"] == nil,
+  eq(r.written["/lib/ocui/pool.lua"], poolSource, "library file copied byte for byte")
+  check(r.written["/usr/bin/ocpool.lua"], "programs go to /usr/bin")
+  check(r.written["/boot/99_ocui.lua"], "the boot hook goes to /boot")
+  check(r.out:find("installed to /lib/ocui"), "success message")
+  check(r.files["/usr/bin/tube.lua"] == nil and r.files["/lib/ocui/tubeproto.lua"] == nil,
     "obsolete tube files removed")
-  check(out:find("removed obsolete /usr/bin/tube.lua", 1, true), "removal reported")
+  check(r.out:find("removed obsolete /usr/bin/tube.lua", 1, true), "removal reported")
 
-  local written2, out2, ok2, err2 = runInstall("ocui/hud.lua")
-  check(not ok2 and type(err2) == "table" and err2.exitCode == 1, "download failure exits 1")
-  check(next(written2) == nil, "nothing written when one download fails")
-  check(out2:find("nothing was changed"), "says nothing was changed")
+  -- a second run with everything in place downloads nothing
+  local have = {}
+  for path, text in pairs(r.written) do have[path] = text end
+  local r2 = runInstall({ have = have })
+  check(r2.ok, "update ran")
+  eq(r2.count, 0, "nothing rewritten")
+  eq(#r2.requests, 1, "only the manifest downloaded")
+  check(r2.out:find("up to date"), "says up to date")
+  check(not r2.out:find("ocpool quit", 1, true), "no restart advice when nothing changed")
+
+  -- one file changed here: only it is downloaded
+  have["/lib/ocui/hud.lua"] = "-- old version\n"
+  local r3 = runInstall({ have = have })
+  eq(r3.count, 1, "one file updated")
+  eq(r3.requests[2], "ocui/hud.lua", "and only that one downloaded")
+  have["/lib/ocui/hud.lua"] = r.written["/lib/ocui/hud.lua"]
+
+  local r4 = runInstall({ have = have, args = { "-f" } })
+  eq(r4.count, #manifest, "-f downloads everything")
+
+  local r5 = runInstall({ failOn = "ocui/hud.lua" })
+  check(not r5.ok and type(r5.err) == "table" and r5.err.exitCode == 1, "download failure exits 1")
+  eq(r5.count, 0, "nothing written when one download fails")
+  check(r5.out:find("nothing was changed"), "says nothing was changed")
+
+  local r6 = runInstall({ corrupt = "ocui/pool.lua" })
+  check(not r6.ok and r6.count == 0, "a file that doesn't match the manifest stops the install")
+  check(r6.out:find("does not match the manifest", 1, true), "and says why")
 end
 
 print(string.format("\n%d passed, %d failed", passes, failures))

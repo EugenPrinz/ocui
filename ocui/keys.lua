@@ -3,7 +3,7 @@
 -- key event table every widget's onKey(ev) receives:
 --
 --   ev.name   "enter", "left", "a", "f5", ... (see NAMES; nil if unknown)
---   ev.code   raw key code
+--   ev.code   raw key code; ev.char the raw char number
 --   ev.text   the typed character as a UTF-8 string, nil for control keys
 --   ev.ctrl, ev.shift, ev.alt   modifier state (tracked by ocui.host)
 --   ev.combo  "ctrl+shift+s" style name for shortcuts (modifiers sorted
@@ -54,7 +54,7 @@ function M.event(char, code, mods)
   mods = mods or {}
   local name = NAMES[code]
   local ev = {
-    code = code, name = name,
+    code = code, name = name, char = char,
     ctrl = mods.ctrl or false, shift = mods.shift or false, alt = mods.alt or false,
   }
   -- Printable unless it is a control character (with Ctrl held, OC

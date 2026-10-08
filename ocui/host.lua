@@ -172,8 +172,8 @@ function Host:mount(ctx)
   ctx:on("key_down", function(_, kb, char, code)
     if not self.suspended and self:ownsKeyboard(kb) then self:keyDown(char, code) end
   end)
-  ctx:on("key_up", function(_, kb, _, code)
-    if self:ownsKeyboard(kb) then self:keyUp(code) end
+  ctx:on("key_up", function(_, kb, char, code)
+    if self:ownsKeyboard(kb) then self:keyUp(code, char) end
   end)
   ctx:on("clipboard", function(_, kb, text)
     if not self.suspended and self:ownsKeyboard(kb) then self:paste(text) end
@@ -187,6 +187,8 @@ function Host:mount(ctx)
 end
 
 function Host:ownsKeyboard(address)
+  -- the virtual keyboards of ocui terminals (ocui-vkb-N) are never ours
+  if type(address) == "string" and address:sub(1, 6) == "ocui-v" then return false end
   return self.keyboards == nil or self.keyboards[address] == true
 end
 
@@ -500,31 +502,51 @@ function Host:scroll(x, y, dir)
   end
 end
 
+-- The focused widget, if it wants raw keys (onRawKey: a terminal).
+function Host:rawKeyTarget()
+  local f = self.focused
+  if f and f.onRawKey and f:getHost() == self and not self:topOverlay() then return f end
+  return nil
+end
+
 function Host:keyDown(char, code)
   local mod = keys.MODIFIERS[code]
   local win = self.window
-  if mod then
-    self.mods[mod] = true
-    if win then win:keyDown(char, code) end
-    return
-  end
+  if mod then self.mods[mod] = true end
   if win and #self.overlays == 0 then
     -- the desktop's own global keys first, then the window
-    local ev = keys.event(char, code, self.mods)
-    local binding = self.bindings[ev.combo]
-    if binding then return binding(ev) end
+    if not mod then
+      local ev = keys.event(char, code, self.mods)
+      local binding = self.bindings[ev.combo]
+      if binding then return binding(ev) end
+    end
     return win:keyDown(char, code)
   end
+  local raw = self:rawKeyTarget()
+  if raw then
+    -- this host's bindings still come first (e.g. a terminal app's own
+    -- shortcuts); everything else goes to the widget as it was typed
+    if not mod then
+      local ev = keys.event(char, code, self.mods)
+      local view = self:currentView()
+      local binding = self.bindings[ev.combo] or (view and view.bindings and view.bindings[ev.combo])
+      if binding then return binding(ev) end
+    end
+    if raw:onRawKey("key_down", char, code) then return end
+  end
+  if mod then return end
   setFocusVisible(self, true)
   if self:dispatchKey(keys.event(char, code, self.mods)) and self.opts.redrawOnInput then
     self:damageAll()
   end
 end
 
-function Host:keyUp(code)
+function Host:keyUp(code, char)
   local mod = keys.MODIFIERS[code]
   if mod then self.mods[mod] = false end
-  if self.window then self.window:keyUp(code) end
+  if self.window then return self.window:keyUp(code, char) end
+  local raw = self:rawKeyTarget()
+  if raw then raw:onRawKey("key_up", char or 0, code) end
 end
 
 -- Focused widget -> its parents -> overlay/view handlers -> bindings ->

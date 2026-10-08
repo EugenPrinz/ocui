@@ -2,73 +2,28 @@
 -- straight from GitHub. Needs an Internet Card.
 --
 --   wget -f https://raw.githubusercontent.com/EugenPrinz/ocui/main/install.lua /tmp/install.lua
---   /tmp/install.lua            -- latest main
---   /tmp/install.lua <ref>      -- a branch, tag or commit
+--   /tmp/install.lua              -- latest main
+--   /tmp/install.lua <ref>        -- a branch, tag or commit
+--   /tmp/install.lua -f [ref]     -- download every file, even unchanged ones
 --
--- Library -> /lib/ocui, programs -> /usr/bin (ocpool, hud, hudctl,
--- ae2_dashboard run from any directory). Your settings in /etc/ocui are
--- never touched. Everything is downloaded first and written only if every
--- file arrived, so a dropped connection can't leave a half-updated install.
+-- The file list comes from manifest.lua in the repository, with each
+-- file's size and checksum: files you already have in the same version
+-- are not downloaded again, and every download is checked before
+-- anything is written. Library -> /lib/ocui, programs -> /usr/bin, the
+-- boot hook -> /boot. Your settings in /etc/ocui are never touched.
+-- Everything is downloaded first and written only if every file arrived
+-- intact, so a dropped connection can't leave a half-updated install.
 
 local component = require("component")
 local filesystem = require("filesystem")
 
 local REPO = "EugenPrinz/ocui"
-local ref = (...) or "main"
+local force, ref = false, nil
+for _, a in ipairs({ ... }) do
+  if a == "-f" or a == "--force" then force = true else ref = ref or a end
+end
+ref = ref or "main"
 local BASE = "https://raw.githubusercontent.com/" .. REPO .. "/" .. ref .. "/"
-
--- { path in the repo, install path }
-local FILES = {
-  { "ocui/ae2.lua",                   "/lib/ocui/ae2.lua" },
-  { "ocui/app.lua",                   "/lib/ocui/app.lua" },
-  { "ocui/canvas.lua",                "/lib/ocui/canvas.lua" },
-  { "ocui/config.lua",                "/lib/ocui/config.lua" },
-  { "ocui/dialog.lua",                "/lib/ocui/dialog.lua" },
-  { "ocui/editor.lua",                "/lib/ocui/editor.lua" },
-  { "ocui/format.lua",                "/lib/ocui/format.lua" },
-  { "ocui/host.lua",                  "/lib/ocui/host.lua" },
-  { "ocui/hud.lua",                   "/lib/ocui/hud.lua" },
-  { "ocui/keys.lua",                  "/lib/ocui/keys.lua" },
-  { "ocui/layout.lua",                "/lib/ocui/layout.lua" },
-  { "ocui/list.lua",                  "/lib/ocui/list.lua" },
-  { "ocui/loop.lua",                  "/lib/ocui/loop.lua" },
-  { "ocui/lsc.lua",                   "/lib/ocui/lsc.lua" },
-  { "ocui/menu.lua",                  "/lib/ocui/menu.lua" },
-  { "ocui/pixels.lua",                "/lib/ocui/pixels.lua" },
-  { "ocui/pool.lua",                  "/lib/ocui/pool.lua" },
-  { "ocui/session.lua",               "/lib/ocui/session.lua" },
-  { "ocui/storage.lua",               "/lib/ocui/storage.lua" },
-  { "ocui/syntax.lua",                "/lib/ocui/syntax.lua" },
-  { "ocui/textinput.lua",             "/lib/ocui/textinput.lua" },
-  { "ocui/textbuffer.lua",            "/lib/ocui/textbuffer.lua" },
-  { "ocui/theme.lua",                 "/lib/ocui/theme.lua" },
-  { "ocui/util.lua",                  "/lib/ocui/util.lua" },
-  { "ocui/widget.lua",                "/lib/ocui/widget.lua" },
-  { "ocui/widgets.lua",               "/lib/ocui/widgets.lua" },
-  { "ocui/apps/dashboard.lua",        "/lib/ocui/apps/dashboard.lua" },
-  { "ocui/apps/desktop.lua",          "/lib/ocui/apps/desktop.lua" },
-  { "ocui/apps/explorer.lua",         "/lib/ocui/apps/explorer.lua" },
-  { "ocui/apps/hud.lua",              "/lib/ocui/apps/hud.lua" },
-  { "ocui/apps/hudctl.lua",           "/lib/ocui/apps/hudctl.lua" },
-  { "ocui/apps/ned.lua",              "/lib/ocui/apps/ned.lua" },
-  { "ocui/apps/render3d.lua",         "/lib/ocui/apps/render3d.lua" },
-  { "ocui/apps/taskmgr.lua",          "/lib/ocui/apps/taskmgr.lua" },
-  { "ocui/apps/uidemo.lua",           "/lib/ocui/apps/uidemo.lua" },
-  { "ocui/services/crafting.lua",     "/lib/ocui/services/crafting.lua" },
-  { "ocui/services/energy.lua",       "/lib/ocui/services/energy.lua" },
-  { "apps/ocpool.lua",                "/usr/bin/ocpool.lua" },
-  { "apps/hud.lua",                   "/usr/bin/hud.lua" },
-  { "apps/hudctl.lua",                "/usr/bin/hudctl.lua" },
-  { "apps/ae2_dashboard.lua",         "/usr/bin/ae2_dashboard.lua" },
-  { "apps/desktop.lua",               "/usr/bin/desktop.lua" },
-  { "apps/explorer.lua",              "/usr/bin/explorer.lua" },
-  { "apps/ned.lua",                   "/usr/bin/ned.lua" },
-  { "apps/ocsession.lua",             "/usr/bin/ocsession.lua" },
-  { "apps/render3d.lua",              "/usr/bin/render3d.lua" },
-  { "apps/taskmgr.lua",               "/usr/bin/taskmgr.lua" },
-  { "apps/uidemo.lua",                "/usr/bin/uidemo.lua" },
-  { "boot/99_ocui.lua",               "/boot/99_ocui.lua" },
-}
 
 -- Copies from the first ocui version, which was copied into /home by hand.
 -- They don't shadow the new programs (PATH is /bin:/usr/bin:/home/bin:.,
@@ -83,6 +38,16 @@ local OBSOLETE = { "/usr/bin/tube.lua", "/lib/ocui/apps/tube.lua", "/lib/ocui/tu
 local function fail(msg)
   io.stderr:write("install: " .. msg .. "\n")
   os.exit(1)
+end
+
+-- Same function as tools/manifest.lua: 32-bit djb2, 8 hex digits.
+local function checksum(s)
+  local h = 5381
+  for i = 1, #s, 4096 do
+    local bytes = { s:byte(i, math.min(i + 4095, #s)) }
+    for j = 1, #bytes do h = (h * 33 + bytes[j]) % 4294967296 end
+  end
+  return string.format("%08x", h)
 end
 
 if not component.isAvailable("internet") then
@@ -107,26 +72,59 @@ local function fetch(url)
   return table.concat(chunks)
 end
 
--- 1. download everything
-print(string.format("ocui: downloading %d files from %s (%s)", #FILES, REPO, ref))
+local function readLocal(path)
+  local f = io.open(path, "rb")
+  if not f then return nil end
+  local text = f:read("*a")
+  f:close()
+  return text
+end
+
+-- 1. the manifest
+print(string.format("ocui: checking %s (%s)", REPO, ref))
+local manifestText, mErr = fetch(BASE .. "manifest.lua")
+if not manifestText then fail("manifest.lua: " .. tostring(mErr) .. "\nnothing was changed") end
+local chunk = load(manifestText, "=manifest", "t", {})
+local okManifest, FILES = false, nil
+if chunk then okManifest, FILES = pcall(chunk) end
+if not okManifest or type(FILES) ~= "table" or #FILES == 0 then
+  fail("manifest.lua is not readable\nnothing was changed")
+end
+
+-- 2. what is missing or different here
+local needed = {}
+for _, f in ipairs(FILES) do
+  local have = not force and readLocal(f[2])
+  if not (have and #have == f[3] and checksum(have) == f[4]) then
+    needed[#needed + 1] = f
+  end
+end
+if #needed == 0 then
+  print(string.format("ocui: up to date (%d files)", #FILES))
+else
+  print(string.format("ocui: %d of %d files to download", #needed, #FILES))
+end
+
+-- 3. download everything needed, checking each file
 local contents = {}
-for i, f in ipairs(FILES) do
-  io.write(string.format("  [%2d/%d] %s ... ", i, #FILES, f[1]))
+for i, f in ipairs(needed) do
+  io.write(string.format("  [%2d/%d] %s ... ", i, #needed, f[1]))
   local body, err = fetch(BASE .. f[1])
   if not body then
     print("FAILED")
     fail(f[1] .. ": " .. tostring(err) .. "\nnothing was changed")
   end
-  if #body == 0 then
+  if #body ~= f[3] or checksum(body) ~= f[4] then
     print("FAILED")
-    fail(f[1] .. ": empty file\nnothing was changed")
+    fail(f[1] .. ": does not match the manifest (GitHub may still be serving a cached"
+      .. " copy right after an update -- try again in a few minutes)\nnothing was changed")
   end
   contents[i] = body
   print(string.format("%d bytes", #body))
 end
 
--- 2. write
-for i, f in ipairs(FILES) do
+-- 4. write
+for i, f in ipairs(needed) do
   local dir = filesystem.path(f[2])
   if not filesystem.exists(dir) then
     local ok, err = filesystem.makeDirectory(dir)
@@ -138,7 +136,7 @@ for i, f in ipairs(FILES) do
   out:close()
 end
 
--- 3. drop cached modules so the next run loads the new code (OpenOS keeps
+-- 5. drop cached modules so the next run loads the new code (OpenOS keeps
 -- required libraries in memory between programs)
 for name in pairs(package.loaded) do
   if name == "ocui" or name:match("^ocui%.") then
@@ -153,7 +151,9 @@ for _, path in ipairs(OBSOLETE) do
   end
 end
 
-print("ocui: installed to /lib/ocui and /usr/bin")
+if #needed > 0 then
+  print("ocui: installed to /lib/ocui and /usr/bin")
+end
 print("      boot into the desktop: `ocsession on` (then reboot); undo: `ocsession off`")
 
 local stale = {}
@@ -167,6 +167,8 @@ if #stale > 0 then
   print("You can remove them: rm " .. table.concat(stale, " "))
 end
 
-print("\nIf a background pool is running (ocpool -b), restart it to load the new code:")
-print("  ocpool quit && ocpool -b")
-print("Your settings in /etc/ocui are kept; older hud.cfg files are converted on first start.")
+if #needed > 0 then
+  print("\nIf a background pool is running (ocpool -b), restart it to load the new code:")
+  print("  ocpool quit && ocpool -b")
+  print("Your settings in /etc/ocui are kept; older hud.cfg files are converted on first start.")
+end

@@ -714,7 +714,7 @@ function M.new(opts)
   function filesystem.list(dir)
     if not dir:match("ocui/apps$") then return fsList(dir) end
     local names = { "dashboard.lua", "desktop.lua", "explorer.lua", "hud.lua", "hudctl.lua", "ned.lua",
-      "render3d.lua", "taskmgr.lua", "uidemo.lua" }
+      "render3d.lua", "taskmgr.lua", "terminal.lua", "uidemo.lua" }
     for _, n in ipairs(extraApps) do table.insert(names, n .. ".lua") end
     local i = 0
     return function() i = i + 1; return names[i] end
@@ -732,9 +732,16 @@ function M.new(opts)
     return true
   end
   local termCalls = { clear = 0 }
-  local term = {}
+  local term = { internal = {} }
   function term.clear() termCalls.clear = termCalls.clear + 1 end
   function term.isAvailable() return true end
+  -- OpenOS terminal windows, as far as ocui.terminal uses them
+  function term.internal.open(dx, dy, w, h) return { dx = dx, dy = dy, width = w, height = h } end
+  function term.bind(gpu, window) window.gpu = gpu; window.keyboard = nil end
+  -- one process; its data is where a terminal window is kept
+  local processData = {}
+  local process = {}
+  function process.info() return { data = processData } end
 
   local threads = {}
   local thread = {}
@@ -756,6 +763,8 @@ function M.new(opts)
     tty = tty,
     shell = shell,
     term = term,
+    process = process,
+    processData = processData,
     executed = executed,
     termCalls = termCalls,
     thread = thread,
