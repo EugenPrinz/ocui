@@ -18,6 +18,7 @@ component API used was checked against those exact source tags.
 |---|---|---|
 | `hud` | On AR glasses: LSC charge %, stored/capacity, avg IN/OUT, a scrolling net-flow graph (green = charging, red = draining), time to full/empty, maintenance & wireless flags; below it the busy AE2 crafting CPUs with progress bar, % and ETA | Glasses Terminal + linked AR Glasses; Adapter on the LSC controller; Adapter on an ME Interface/Controller |
 | `dashboard` | On a screen: one panel per crafting CPU with output, progress %, ETA | T2+ GPU and screen; Adapter on an ME Interface/Controller |
+| `taskmgr` | On a screen: task manager — every app with state, uptime, restarts, CPU time and errors (start/stop/restart with F5/F6/F7 or Enter), the shared services and who uses them, system info (memory and energy with a memory chart, components), the pool log. Controls the background pool if one runs, else a local pool with every installed app | T3 GPU and screen, a keyboard on the screen |
 | `uidemo` | On a screen: a tour of the screen widgets — menu bar, list with columns, text fields, dialogs, split panes, status bar, running an OpenOS program and coming back. Keyboard and touch; Ctrl+Q quits | T3 GPU and screen, a keyboard on the screen |
 | `hudctl` | On a screen: control panel for the HUD (a profile per glasses terminal; show/hide panels and parts, anchor + offset per panel, width, text size, to-scale preview) and an **Energy** tab: live LSC numbers, net-flow and charge charts over 2 min / 1 h / 24 h, avg/min/max, EU in/out | T2+ GPU and screen (80x25+); an LSC for the Energy tab |
 
@@ -68,6 +69,32 @@ How it behaves:
   There 'q' and Ctrl+C belong to the shell and are ignored, and an app
   may not take the shell's screen. Put `ocpool -b` in `/home/.shrc` to
   start your apps on boot.
+
+### Task manager
+
+`taskmgr` shows what the pool is doing and lets you start and stop apps:
+
+- **Apps** (F1): every installed app with its state (`*` = restart
+  pending), uptime, restarts, CPU time it used in the last second (ms per
+  second), live tasks/handlers and its description or last error; below,
+  details and the app's recent log lines. F5 start, F6 (or Del) stop, F7
+  restart, Enter or a right click for a menu.
+- **Services** (F2): the shared data services, their CPU time and which
+  apps use them.
+- **System** (F3): memory and energy of the computer, a 2-minute memory
+  chart, every component with its address.
+- **Log** (F4): `/tmp/ocpool.log`, following new lines while the last one
+  is selected.
+
+Run as `taskmgr` while a background pool runs (`ocpool -b ...`), it
+controls that pool. Without one, it runs a local pool holding every
+installed app; on Ctrl+Q, if you started apps there, it offers to keep
+them running in the background (it hands them to `ocpool -b`). It can also
+live in the background pool itself on a second screen: `ocpool -b hud
+taskmgr` with `gpu`/`screen` set in `/etc/ocui/taskmgr.cfg`.
+
+In a foreground pool, `q` quits only while no keyboard app (taskmgr,
+uidemo) is running; those quit with Ctrl+Q.
 
 ## Configuration
 
@@ -155,6 +182,7 @@ ocui/                 the library — copy this whole folder to /lib/ocui
     hud.lua             app: glasses HUD (LSC + autocraft)
     hudctl.lua          app: HUD control panel + energy charts
     dashboard.lua       app: screen dashboard of crafting CPUs
+    taskmgr.lua         app: task manager
     uidemo.lua          app: widget demo
 
 apps/                  programs — copy to /home or /usr/bin
@@ -162,6 +190,7 @@ apps/                  programs — copy to /home or /usr/bin
   hud.lua               shortcut: hud alone
   hudctl.lua            shortcut: control panel (+ hud, or the background one)
   ae2_dashboard.lua     shortcut: dashboard alone
+  taskmgr.lua           task manager (background pool, or a local one)
   uidemo.lua            shortcut: widget demo
 
 install.lua            in-game installer/updater (Internet Card)

@@ -46,49 +46,7 @@ local function parseArgs(...)
   return args, opts
 end
 
--- Directories that can hold ocui.apps.* modules, from package.path.
-local function appDirs()
-  local dirs, seen = {}, {}
-  for template in package.path:gmatch("[^;]+") do
-    local base = template:match("^(.*)%?%.lua$")
-    if base then
-      local dir = base .. "ocui/apps"
-      if not seen[dir] then
-        seen[dir] = true
-        table.insert(dirs, dir)
-      end
-    end
-  end
-  return dirs
-end
-
-local function availableApps()
-  local okFs, fs = pcall(require, "filesystem")
-  local names, seen = {}, {}
-  if not okFs then return names end
-  for _, dir in ipairs(appDirs()) do
-    if fs.isDirectory(dir) then
-      for entry in fs.list(dir) do
-        local name = entry:match("^([%w_%-]+)%.lua$")
-        if name and not seen[name] then
-          seen[name] = true
-          table.insert(names, name)
-        end
-      end
-    end
-  end
-  table.sort(names)
-  return names
-end
-
-local function loadApp(name)
-  local ok, module = pcall(require, "ocui.apps." .. name)
-  if not ok then return nil, tostring(module) end
-  if type(module) ~= "table" or type(module.start) ~= "function" then
-    return nil, "ocui.apps." .. name .. " is not an app module"
-  end
-  return module
-end
+local availableApps, loadApp = Pool.availableApps, Pool.loadApp
 
 -- Sends a command to a running background pool; returns ok, text, or
 -- nil, "no background pool is running".
@@ -218,12 +176,7 @@ for _, name in ipairs(names) do
   end
   pool:register(module)
 end
-for _, name in ipairs(availableApps()) do
-  if not pool.apps[name] then
-    local module = loadApp(name)
-    if module then pool:register(module) end
-  end
-end
+pool:registerAvailable()
 
 if background then
   local okThread, thread = pcall(require, "thread")

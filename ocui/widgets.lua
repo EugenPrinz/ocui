@@ -461,6 +461,14 @@ function Tabs:draw(canvas)
   end
 end
 
+-- Switches to tab `index` (as a click on it would).
+function Tabs:setActive(index)
+  if index < 1 or index > #self.tabs or index == self.active then return end
+  self.active = index
+  self:invalidate()
+  if self.onSelect then self.onSelect(index) end
+end
+
 function Tabs:onTouch(x)
   for _, hit in ipairs(self.hits) do
     if x >= hit.x0 and x <= hit.x1 then
@@ -620,6 +628,73 @@ function Chart:draw(canvas)
         canvas:text(lx, zeroRow, "0", self.labelColor)
       end
     end
+  end
+end
+
+-- --------------------------------------------------------------- TextBox --
+
+-- Read-only multi-line text. setText(text) word-wraps plain text;
+-- setLines({ "line" | { text = "line", color = 0xRRGGBB }, ... }) shows
+-- lines as given. props: text or lines, fg, bg.
+local TextBox = setmetatable({}, { __index = Widget })
+TextBox.__index = TextBox
+M.TextBox = TextBox
+
+function TextBox.new(props)
+  local self = setmetatable(Widget.new(props), TextBox)
+  self.fg = props.fg or theme.text
+  self.bg = props.bg
+  self.lines = props.lines or {}
+  self.text = props.text
+  return self
+end
+
+function TextBox:setText(text, color)
+  if text == self.text and color == self.textColor then return end
+  self.text, self.textColor = text, color
+  self.lines = nil
+  self:invalidate()
+end
+
+-- Only the lines that changed are repainted.
+function TextBox:setLines(lines)
+  lines = lines or {}
+  local old = self.lines
+  local wasText = self.text ~= nil
+  self.text = nil
+  self.lines = lines
+  if wasText or not old then
+    self:invalidate()
+    return
+  end
+  local function key(line)
+    if type(line) == "table" then return tostring(line.text) .. " " .. tostring(line.color) end
+    return tostring(line)
+  end
+  for i = 1, math.min(math.max(#old, #lines), self.h) do
+    if old[i] == nil or lines[i] == nil or key(old[i]) ~= key(lines[i]) then
+      self:invalidate(0, i - 1, self.w, 1)
+    end
+  end
+end
+
+function TextBox:draw(canvas)
+  if self.bg then
+    canvas:fillRect(0, 0, self.w, self.h, self.bg)
+    canvas.bg = self.bg
+  end
+  local lines = self.lines
+  if self.text then
+    lines = {}
+    for i, line in ipairs(util.wrap(self.text, self.w)) do
+      lines[i] = { text = line, color = self.textColor }
+    end
+  end
+  for y = 0, math.min(#lines, self.h) - 1 do
+    local line = lines[y + 1]
+    local text, color = line, nil
+    if type(line) == "table" then text, color = line.text, line.color end
+    canvas:text(0, y, util.ellipsis(tostring(text or ""), self.w), color or self.fg)
   end
 end
 

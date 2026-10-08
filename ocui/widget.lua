@@ -93,7 +93,7 @@ end
 -- default: the whole widget.
 function Widget:invalidate(x, y, w, h)
   local host = self:getHost()
-  if not host then return end
+  if not host or not self:isShown() then return end
   local ax, ay = self:absPos()
   host:damage(ax + (x or 0), ay + (y or 0), w or self.w or 0, h or self.h or 0)
 end

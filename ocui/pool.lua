@@ -43,7 +43,9 @@
 -- that one; it is restarted after `restartDelay` seconds, up to
 -- `maxRestarts` times (the count resets once it has run for 5 minutes).
 --
--- Control from another program (used by `ocpool` in background mode):
+-- Control from another program (used by `ocpool` in background mode; only
+-- a pool created with remote = true -- by default, a background one --
+-- answers):
 --   computer.pushSignal("ocpool", cmd, arg, replyId)
 --   cmd: "status" | "start" | "stop" | "restart" | "quit" | "ping"
 --   reply: signal "ocpool_reply", replyId, ok, text (status = serialized)
@@ -70,6 +72,8 @@ local LOG_KEEP = 50
 -- opts.restartDelay (10), opts.maxRestarts (5), opts.serviceLinger (15).
 -- opts.stopWhenIdle: stop the loop once no app is running or pending a
 --   restart (default true).
+-- opts.remote: answer `ocpool` control signals (default: = background).
+-- opts.logPath: log file (default Pool.LOG_PATH).
 function Pool.new(opts)
   opts = opts or {}
   local self = setmetatable({
@@ -85,15 +89,20 @@ function Pool.new(opts)
     stopWhenIdle = opts.stopWhenIdle ~= false,
     recent = {},
     logLines = 0,
+    logPath = opts.logPath or Pool.LOG_PATH,
   }, Pool)
+  local remote = opts.remote
+  if remote == nil then remote = self.background end
   self.loop = Loop.new({
     quitChar = (not self.background) and 113 or false,
     stopOnInterrupt = not self.background,
     onError = function(err, owner) self:onError(owner, err) end,
   })
-  self.loop:on(Pool.SIGNAL, function(_, cmd, arg, replyId)
-    self:command(cmd, arg, replyId)
-  end, self)
+  if remote then
+    self.loop:on(Pool.SIGNAL, function(_, cmd, arg, replyId)
+      self:command(cmd, arg, replyId)
+    end, self)
+  end
   return self
 end
 
@@ -109,9 +118,9 @@ function Pool:log(source, fmt, ...)
   -- keep the file bounded: rewrite it from the in-memory tail now and then
   if self.logLines > 500 then
     self.logLines = #self.recent
-    pcall(storage.write, Pool.LOG_PATH, table.concat(self.recent, "\n") .. "\n")
+    pcall(storage.write, self.logPath, table.concat(self.recent, "\n") .. "\n")
   else
-    pcall(storage.append, Pool.LOG_PATH, line .. "\n")
+    pcall(storage.append, self.logPath, line .. "\n")
   end
 end
 
@@ -133,10 +142,7 @@ local function newRecord(module, kind)
   }
 end
 
--- An app module with `keyboard = true` takes text input, so a plain 'q'
--- must not quit the pool while it runs (it brings its own way out).
 function Pool:register(module)
-  if module.keyboard then self.loop.quitChar = false end
   if not self.apps[module.name] then
     table.insert(self.order, module.name)
   end
@@ -257,6 +263,9 @@ local function newContext(pool, rec, cfg)
     if rec.kind == "app" then pool:stop(rec.name) end
   end
   function ctx:apps() return pool:status() end
+  function ctx:services() return pool:serviceStatus() end
+  -- Stops the whole pool (every app), as `ocpool quit` would.
+  function ctx:quitPool() pool.loop:stop() end
   function ctx:startApp(name) return pool:start(name) end
   function ctx:stopApp(name) return pool:stop(name) end
   function ctx:restartApp(name) return pool:restart(name) end
@@ -296,6 +305,7 @@ function Pool:startRecord(rec)
     return nil, rec.error
   end
   if rec.kind == "service" then rec.api = result end
+  self:updateQuitKey()
   self:log("pool", "started %s%s", rec.kind == "service" and "service " or "", rec.name)
   return true
 end
@@ -379,8 +389,23 @@ function Pool:onError(owner, err)
   end
 end
 
+-- An app module with `keyboard = true` takes text input, so a plain 'q'
+-- must not quit a foreground pool while such an app runs (it brings its
+-- own way out).
+function Pool:updateQuitKey()
+  if self.background then return end
+  for _, app in pairs(self.apps) do
+    if app.state == "running" and app.module.keyboard then
+      self.loop.quitChar = false
+      return
+    end
+  end
+  self.loop.quitChar = 113
+end
+
 -- Services alone don't keep a foreground pool alive.
 function Pool:checkIdle()
+  self:updateQuitKey()
   if not self.stopWhenIdle or self.starting or not self.loop.running then return end
   for _, name in ipairs(self.order) do
     local app = self.apps[name]
@@ -402,6 +427,8 @@ function Pool:status()
       uptime = app.state == "running" and (now - app.startedAt) or nil,
       restarts = app.restarts,
       pendingRestart = app.pendingRestart or nil,
+      cpu = self.loop:cpuTime(app),
+      tasks = app.state == "running" and self.loop:countOwned(app) or 0,
     })
   end
   return list
@@ -413,7 +440,8 @@ function Pool:serviceStatus()
     local users = {}
     for user in pairs(svc.users) do table.insert(users, user.name) end
     table.sort(users)
-    table.insert(list, { name = name, state = svc.state, error = svc.error, users = users })
+    table.insert(list, { name = name, state = svc.state, error = svc.error, users = users,
+      cpu = self.loop:cpuTime(svc) })
   end
   table.sort(list, function(a, b) return a.name < b.name end)
   return list
@@ -451,7 +479,7 @@ end
 -- Starts `names` (all registered apps if nil) and runs until quit. Every
 -- app and service is stopped (cleanups run) before returning.
 function Pool:run(names)
-  pcall(storage.write, Pool.LOG_PATH, "")
+  pcall(storage.write, self.logPath, "")
   self.starting = true
   for _, name in ipairs(names or self.order) do
     local ok, err = self:start(name)
@@ -476,6 +504,64 @@ function Pool:run(names)
     if svc.state == "running" then
       self:teardown(svc)
       svc.state = "stopped"
+    end
+  end
+end
+
+-- ------------------------------------------------------------ app lookup --
+
+-- Directories that can hold ocui.apps.* modules, from package.path.
+local function appDirs()
+  local dirs, seen = {}, {}
+  for template in package.path:gmatch("[^;]+") do
+    local base = template:match("^(.*)%?%.lua$")
+    if base then
+      local dir = base .. "ocui/apps"
+      if not seen[dir] then
+        seen[dir] = true
+        table.insert(dirs, dir)
+      end
+    end
+  end
+  return dirs
+end
+
+-- Names of the app modules installed (ocui/apps/*.lua), sorted.
+function Pool.availableApps()
+  local okFs, fs = pcall(require, "filesystem")
+  local names, seen = {}, {}
+  if not okFs then return names end
+  for _, dir in ipairs(appDirs()) do
+    if fs.isDirectory(dir) then
+      for entry in fs.list(dir) do
+        local name = entry:match("^([%w_%-]+)%.lua$")
+        if name and not seen[name] then
+          seen[name] = true
+          table.insert(names, name)
+        end
+      end
+    end
+  end
+  table.sort(names)
+  return names
+end
+
+-- Loads app module `name`; returns it, or nil + error.
+function Pool.loadApp(name)
+  local ok, module = pcall(require, "ocui.apps." .. name)
+  if not ok then return nil, tostring(module) end
+  if type(module) ~= "table" or type(module.start) ~= "function" then
+    return nil, "ocui.apps." .. name .. " is not an app module"
+  end
+  return module
+end
+
+-- Registers every installed app that loads (and isn't registered yet).
+function Pool:registerAvailable()
+  for _, name in ipairs(Pool.availableApps()) do
+    if not self.apps[name] then
+      local module = Pool.loadApp(name)
+      if module then self:register(module) end
     end
   end
 end

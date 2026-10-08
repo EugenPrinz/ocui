@@ -14,7 +14,8 @@ local id = string.format("hudctl-ping-%d", math.random(1, 1000000000))
 computer.pushSignal(Pool.SIGNAL, "ping", nil, id)
 local background = event.pull(0.5, Pool.REPLY, id) ~= nil
 
-local pool = Pool.new({})
+-- next to a background pool, keep its log (/tmp/ocpool.log) intact
+local pool = Pool.new({ logPath = background and "/tmp/hudctl.log" or nil })
 if not background then
   pool:register((require("ocui.apps.hud")))
 end

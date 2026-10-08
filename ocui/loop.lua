@@ -28,6 +28,10 @@ local event = require("event")
 local Loop = {}
 Loop.__index = Loop
 
+-- CPU seconds (os.clock) spent in each owner's tasks, handlers and idle
+-- hooks; nil-safe where os.clock is missing.
+local clock = os and os.clock or function() return 0 end
+
 local SLEEP = {} -- unique token marking our own yields
 
 -- Number of task coroutines currently being resumed (across loops). In
@@ -56,6 +60,7 @@ function Loop.new(opts)
     onError = opts.onError,
     running = false,
     current = nil,
+    stats = setmetatable({}, { __mode = "k" }), -- owner -> { cpu = seconds }
   }, Loop)
 end
 
@@ -121,6 +126,37 @@ function Loop:idle(fn, owner)
   return h
 end
 
+-- Adds `seconds` of CPU time to `owner`'s account.
+function Loop:account(owner, seconds)
+  if owner == nil then return end
+  local s = self.stats[owner]
+  if not s then
+    s = { cpu = 0 }
+    self.stats[owner] = s
+  end
+  s.cpu = s.cpu + seconds
+end
+
+-- CPU seconds used so far by `owner`'s tasks and handlers.
+function Loop:cpuTime(owner)
+  local s = self.stats[owner]
+  return s and s.cpu or 0
+end
+
+-- Live tasks + handlers registered by `owner`.
+function Loop:countOwned(owner)
+  local n = 0
+  for _, e in ipairs(self.entries) do
+    if e.owner == owner and not e.cancelled then n = n + 1 end
+  end
+  for _, list in pairs(self.handlers) do
+    for _, h in ipairs(list) do
+      if h.owner == owner and not h.cancelled then n = n + 1 end
+    end
+  end
+  return n
+end
+
 -- Cancels every task and handler registered with this owner.
 function Loop:cancelOwner(owner)
   for _, e in ipairs(self.entries) do
@@ -168,7 +204,9 @@ function Loop:step(entry)
   end
   self.current = entry
   tasksResuming = tasksResuming + 1
+  local t0 = clock()
   local resumed = table.pack(coroutine.resume(entry.co))
+  self:account(entry.owner, clock() - t0)
   tasksResuming = tasksResuming - 1
   self.current = nil
 
@@ -237,9 +275,11 @@ local function callHandlers(self, list, signal)
   for i, h in ipairs(list) do snapshot[i] = h end
   for _, h in ipairs(snapshot) do
     if not h.cancelled then
+      local t0 = clock()
       local ok, err = xpcall(function()
         h.fn(table.unpack(signal, 1, signal.n))
       end, traceback)
+      self:account(h.owner, clock() - t0)
       if not ok then self:fail(err, h.owner, h) end
     end
   end
@@ -285,7 +325,9 @@ function Loop:runIdle()
   for _, h in ipairs(live) do
     if not self.running then return end
     if not h.cancelled then
+      local t0 = clock()
       local ok, err = xpcall(h.fn, traceback)
+      self:account(h.owner, clock() - t0)
       if not ok then self:fail(err, h.owner, h) end
     end
   end

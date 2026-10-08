@@ -43,6 +43,7 @@ local FILES = {
   { "ocui/apps/dashboard.lua",        "/lib/ocui/apps/dashboard.lua" },
   { "ocui/apps/hud.lua",              "/lib/ocui/apps/hud.lua" },
   { "ocui/apps/hudctl.lua",           "/lib/ocui/apps/hudctl.lua" },
+  { "ocui/apps/taskmgr.lua",          "/lib/ocui/apps/taskmgr.lua" },
   { "ocui/apps/uidemo.lua",           "/lib/ocui/apps/uidemo.lua" },
   { "ocui/services/crafting.lua",     "/lib/ocui/services/crafting.lua" },
   { "ocui/services/energy.lua",       "/lib/ocui/services/energy.lua" },
@@ -50,6 +51,7 @@ local FILES = {
   { "apps/hud.lua",                   "/usr/bin/hud.lua" },
   { "apps/hudctl.lua",                "/usr/bin/hudctl.lua" },
   { "apps/ae2_dashboard.lua",         "/usr/bin/ae2_dashboard.lua" },
+  { "apps/taskmgr.lua",               "/usr/bin/taskmgr.lua" },
   { "apps/uidemo.lua",                "/usr/bin/uidemo.lua" },
 }
 

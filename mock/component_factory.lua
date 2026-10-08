@@ -601,6 +601,11 @@ function M.new(opts)
   local queue = {}   -- signals from computer.pushSignal, delivered first
   local pushed = {}  -- every pushed signal, for assertions
   local computer = { uptime = now }
+  function computer.address() return "computer-1" end
+  function computer.totalMemory() return opts.totalMemory or 2097152 end
+  function computer.freeMemory() return opts.freeMemory or 1048576 end
+  function computer.energy() return 5000 end
+  function computer.maxEnergy() return 10000 end
   function computer.pushSignal(...)
     local sig = table.pack(...)
     table.insert(queue, sig)
@@ -707,7 +712,7 @@ function M.new(opts)
   end
   function filesystem.list(dir)
     if not dir:match("ocui/apps$") then return fsList(dir) end
-    local names = { "dashboard.lua", "hud.lua", "hudctl.lua" }
+    local names = { "dashboard.lua", "hud.lua", "hudctl.lua", "taskmgr.lua", "uidemo.lua" }
     for _, n in ipairs(extraApps) do table.insert(names, n .. ".lua") end
     local i = 0
     return function() i = i + 1; return names[i] end
@@ -775,7 +780,8 @@ end
 
 local NAMED = {
   escape = { 1, 27 }, back = { 14, 8 }, tab = { 15, 9 }, enter = { 28, 13 }, space = { 57, 32 },
-  f1 = { 59, 0 }, f2 = { 60, 0 }, f3 = { 61, 0 }, f4 = { 62, 0 }, f5 = { 63, 0 }, f10 = { 68, 0 },
+  f1 = { 59, 0 }, f2 = { 60, 0 }, f3 = { 61, 0 }, f4 = { 62, 0 }, f5 = { 63, 0 }, f6 = { 64, 0 },
+  f7 = { 65, 0 }, f8 = { 66, 0 }, f9 = { 67, 0 }, f10 = { 68, 0 }, f11 = { 87, 0 }, f12 = { 88, 0 },
   home = { 199, 0 }, up = { 200, 0 }, pageUp = { 201, 0 }, left = { 203, 0 }, right = { 205, 0 },
   ["end"] = { 207, 0 }, down = { 208, 0 }, pageDown = { 209, 0 }, insert = { 210, 0 },
   delete = { 211, 127 },

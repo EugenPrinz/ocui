@@ -721,7 +721,7 @@ do
   local env = factory.new({ glasses = 1, maxPulls = 60, lsc = LSC_EN, endSignal = { "ocpool", "quit" } })
   install(env)
   local Pool = require("ocui.pool")
-  local pool = Pool.new({ maxRestarts = 0, serviceLinger = 5, stopWhenIdle = false })
+  local pool = Pool.new({ maxRestarts = 0, serviceLinger = 5, stopWhenIdle = false, remote = true })
   pool:register(require("ocui.apps.hud"))
   local energyApi
   pool:register({ name = "probe", start = function(ctx)
@@ -1362,6 +1362,101 @@ do
   local split = layout.Split.new({ w = 40, h = 10, size = 100, min = 5,
     first = widgets.Label.new({}), second = widgets.Label.new({}) })
   eq(split:firstSize(), 34, "size clamped to leave the second pane its minimum")
+end
+
+-- ============================================================ taskmgr ==
+
+section("taskmgr: local pool -- start/stop apps, tabs, keep running on quit")
+do
+  local env
+  local seen = {}
+  local function snap(key) return function() seen[key] = screenOf(env); return false end end
+
+  local events = factory.script(
+    false, snap("start"),
+    factory.typeText("h"), factory.press("f5"), false, false, snap("hudStarted"),
+    factory.press("up"), factory.press("up"), factory.press("f6"), snap("selfStop"),     -- taskmgr itself
+    factory.press("down"), factory.press("down"), factory.press("f6"), false, snap("hudStopped"),
+    factory.press("f5"), false, false,
+    factory.press("f2"), false, snap("services"),
+    factory.press("f3"), false, snap("system"),
+    factory.press("f4"), false, snap("log"),
+    factory.press("f1"), factory.press("ctrl+q"), snap("quitDialog"), factory.press("enter")
+  )
+  env = factory.new({ maxW = 160, maxH = 50, glasses = 1, lsc = LSC_EN, events = events,
+    maxPulls = #events + 3, endSignal = { "interrupted", 0 } })
+  local ok, err = runApp("apps/taskmgr.lua", env)
+  check(ok, "taskmgr ran: " .. tostring(err))
+  check(seen.start and findText(seen.start, "local pool"), "local mode without a background pool")
+  check(seen.start and findText(seen.start, "uidemo") and findText(seen.start, "dashboard"),
+    "every installed app listed")
+  local function row(frame, name)
+    local _, y = findText(frame or "", name .. " ")
+    if not y then return "" end
+    local n = 0
+    for line in (frame .. "\n"):gmatch("(.-)\n") do
+      n = n + 1
+      if n == y then return line end
+    end
+    return ""
+  end
+  check(row(seen.hudStarted, "hud"):find("running"), "type-ahead 'h' + F5 started the HUD")
+  check(seen.selfStop and findText(seen.selfStop, "That is this task manager"), "won't stop itself")
+  check(row(seen.hudStopped, "hud"):find("stopped"), "F6 stopped the HUD")
+  check(seen.services and findText(seen.services, "energy") and row(seen.services, "energy"):find("hud"),
+    "services tab: energy used by hud")
+  check(seen.system and findText(seen.system, "gt_machine") and findText(seen.system, "Memory"),
+    "system tab: components and memory")
+  check(seen.log and findText(seen.log, "pool: started hud"), "log tab shows the pool log")
+  check(seen.quitDialog and findText(seen.quitDialog, "Keep it running in the background?"),
+    "quitting with the HUD running asks")
+  local exec = env.executed[1]
+  check(exec and exec.cmd == "ocpool" and exec.args[1] == "-b" and exec.args[2] == "hud",
+    "Keep running: the HUD handed to `ocpool -b hud`")
+  local cpuShown = row(seen.hudStarted, "taskmgr"):match("%d+%.%d")
+  check(cpuShown ~= nil, "CPU time per app shown")
+end
+
+section("taskmgr: remote control of a background pool")
+do
+  local events = factory.script(false, false,
+    factory.press("down"), factory.press("f5"), false, false,       -- start beta
+    factory.press("up"), factory.press("f7"), false, false,         -- restart alpha
+    factory.press("ctrl+q"))
+  -- status replies are pulls too: leave room for them
+  local env = factory.new({ maxW = 160, maxH = 50, events = events, maxPulls = #events + 40,
+    endSignal = { "interrupted", 0 } })
+  install(env)
+  local Pool = require("ocui.pool")
+  -- the background pool: a real Pool answering ocpool signals
+  local bg = Pool.new({ background = true, logPath = "/tmp/bg.log" })
+  local starts = { alpha = 0, beta = 0 }
+  for _, name in ipairs({ "alpha", "beta" }) do
+    bg:register({ name = name, description = name .. " app", start = function()
+      starts[name] = starts[name] + 1
+    end })
+  end
+  bg:start("alpha")
+  local taskmgr = require("ocui.apps.taskmgr")
+  taskmgr.remoteMode = true
+  local fg = Pool.new({})
+  fg:register(taskmgr)
+  -- stands in for the background pool's own loop: hands it the signals
+  fg:register({ name = "bgpool", start = function(ctx)
+    ctx:on(Pool.SIGNAL, function(_, cmd, arg, replyId)
+      bg:command(cmd, arg, replyId)
+    end)
+  end })
+  fg:run({ "taskmgr", "bgpool" })
+  local frame = env.gpu._lastFrame() or ""
+  check(frame:find("background pool", 1, true), "remote mode shown")
+  eq(bg.apps.beta.state, "running", "F5 started beta in the background pool")
+  if verbose then print(frame) end
+  check(env.pulls() < #events + 30, "Ctrl+Q quit taskmgr")
+  eq(starts.alpha, 2, "F7 restarted alpha")
+  check(frame:find("beta app", 1, true), "the background pool's apps listed")
+  eq(bg.loop.running, false, "quitting taskmgr leaves the background pool alone (never ran here)")
+  eq(bg.apps.alpha.state, "running", "background apps keep running after taskmgr quits")
 end
 
 section("install.lua")
