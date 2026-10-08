@@ -12,6 +12,7 @@ local computer = require("computer")
 
 local Dialog = require("ocui.dialog")
 local Host = require("ocui.host")
+local Pool = require("ocui.pool")
 local menu = require("ocui.menu")
 local theme = require("ocui.theme")
 local util = require("ocui.util")
@@ -279,11 +280,23 @@ function M.start(ctx, cfg)
     end)
   end
 
+  -- Runs `fn` after asking, if windows are open.
+  local function confirmClose(title, fn)
+    if #desk.windows == 0 then return fn() end
+    Dialog.confirm(host, title, "Close " .. #desk.windows .. " window(s)?", function(yes)
+      if yes then fn() end
+    end, title, "Cancel")
+  end
+
   local function exitDesktop()
-    if #desk.windows == 0 then return ctx:quitPool() end
-    Dialog.confirm(host, "Exit desktop", "Close " .. #desk.windows .. " window(s) and exit?", function(yes)
-      if yes then ctx:quitPool() end
-    end, "Exit", "Cancel")
+    confirmClose("Exit", function() ctx:quitPool() end)
+  end
+
+  local function shutdown(reboot)
+    confirmClose(reboot and "Reboot" or "Shut down", function()
+      ctx:quitPool()
+      computer.shutdown(reboot)
+    end)
   end
 
   function desk.toggleStart()
@@ -303,7 +316,14 @@ function M.start(ctx, cfg)
     items[#items + 1] = { separator = true }
     items[#items + 1] = { label = "Home screen", key = "^D", action = function() desk.activate(nil) end }
     items[#items + 1] = { label = "OpenOS shell", action = runShell }
-    items[#items + 1] = { label = "Exit desktop", action = exitDesktop }
+    if require("ocui.session").active then
+      -- booted into the desktop: leaving it means the shell, or power
+      items[#items + 1] = { label = "Exit to shell", action = exitDesktop }
+      items[#items + 1] = { label = "Reboot", action = function() shutdown(true) end }
+      items[#items + 1] = { label = "Shut down", action = function() shutdown(false) end }
+    else
+      items[#items + 1] = { label = "Exit desktop", action = exitDesktop }
+    end
     local popup
     popup = menu.open(host, 0, H - 1 - (#items + 2), items, {
       minWidth = 28,
@@ -321,6 +341,14 @@ function M.start(ctx, cfg)
   host:bind("ctrl+tab", function() desk.cycle(1) end)
   host:bind("ctrl+shift+tab", function() desk.cycle(-1) end)
   host:bind("ctrl+d", function() desk.activate(nil) end) -- (F11 is Minecraft's fullscreen key)
+
+  -- an app that crashed: say so (the pool restarts it after a while)
+  ctx:on(Pool.FAILED, function(_, name, err, kind)
+    if name == M.name then return end
+    Dialog.message(host, (kind == "service" and "Service " or "") .. name .. " stopped",
+      util.ellipsis(tostring(err), 300) .. "\n\nIt will be restarted shortly; details in "
+        .. Pool.LOG_PATH .. ".")
+  end)
 
   host:setView({ root = rootBox })
   buildHome()

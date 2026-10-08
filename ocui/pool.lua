@@ -63,6 +63,7 @@ Pool.__index = Pool
 Pool.SIGNAL = "ocpool"
 Pool.REPLY = "ocpool_reply"
 Pool.LOG_PATH = "/tmp/ocpool.log"
+Pool.FAILED = "pool_app_failed" -- emitted (name, error, kind) when an app/service fails
 
 local STABLE_AFTER = 300 -- seconds of uptime that reset the restart count
 local LOG_KEEP = 50
@@ -360,6 +361,8 @@ function Pool:markFailed(rec, err, allowRestart)
   rec.errorFull = tostring(err)
   rec.error = rec.errorFull:match("^[^\n]*")
   self:log(rec.name, "FAILED: %s", tostring(err))
+  -- in-process event for whoever watches the pool (the desktop, a session)
+  self.loop:emit(Pool.FAILED, rec.name, rec.error, rec.kind)
   if allowRestart and rec.restarts < self.maxRestarts then
     rec.pendingRestart = true
     local delay = self.restartDelay

@@ -74,6 +74,36 @@ How it behaves:
   may not take the shell's screen. Put `ocpool -b` in `/home/.shrc` to
   start your apps on boot.
 
+### Booting into the desktop: `ocsession`
+
+```
+ocsession on      # from the next boot on, the desktop instead of the shell
+ocsession off     # back to the plain OpenOS shell
+```
+
+OpenOS runs `/boot/*.lua` at boot and then the program in `$SHELL`;
+`/boot/99_ocui.lua` (installed by `install.lua`) points `$SHELL` at
+`/usr/bin/ocsession.lua` when the session is on. No OpenOS file is
+changed, and the boot script only does it if the session program
+compiles, so a broken update can't lock you out.
+
+At boot:
+
+1. a splash screen counts down (`splash` seconds) — press any key for the
+   plain OpenOS shell instead;
+2. the background pool starts (`ocpool -b`, i.e. the `autostart` apps from
+   `/etc/ocui/ocpool.cfg`, e.g. the HUD), once per boot;
+3. the desktop opens. Its start menu then has **Exit to shell**,
+   **Reboot** and **Shut down**; `exit` in that shell brings the desktop
+   back.
+
+If the desktop crashes, a crash screen shows the error (also appended to
+`/home/ocui-crash.log`): R restarts it, S opens the shell, and it restarts
+by itself after `autoRestart` seconds — unless it crashed three times
+within a minute. Apps in windows that crash are reported in a dialog and
+restarted by the pool. Settings: `/etc/ocui/session.cfg` (`boot`,
+`splash`, `backgroundPool`, `autoRestart`).
+
 ### Task manager
 
 `taskmgr` shows what the pool is doing and lets you start and stop apps:
@@ -176,6 +206,8 @@ ocui/                 the library — copy this whole folder to /lib/ocui
   dialog.lua            screen: message / confirm / prompt dialogs
   menu.lua              screen: pop-up menus, MenuBar
   pixels.lua            screen: PixelView (half-block pixels, lines, triangles)
+  session.lua           boot session: splash, background pool, desktop,
+                        crash screen, shell
   textbuffer.lua        text: lines + UTF-8 positions, undo/redo, search
   syntax.lua            text: line-by-line highlighters (Lua)
   editor.lua            screen: Editor widget (highlighting, selection...)
@@ -208,6 +240,9 @@ apps/                  programs — copy to /home or /usr/bin
   ned.lua               the editor: `ned [file]`
   explorer.lua          the file manager: `explorer [dir]`
   desktop.lua           the desktop, with every installed app
+  ocsession.lua         boot into the desktop: `ocsession on|off|status`
+
+boot/99_ocui.lua       OpenOS boot script: $SHELL -> ocsession when on
   uidemo.lua            shortcut: widget demo
 
 install.lua            in-game installer/updater (Internet Card)

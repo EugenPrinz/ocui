@@ -36,6 +36,7 @@ local FILES = {
   { "ocui/menu.lua",                  "/lib/ocui/menu.lua" },
   { "ocui/pixels.lua",                "/lib/ocui/pixels.lua" },
   { "ocui/pool.lua",                  "/lib/ocui/pool.lua" },
+  { "ocui/session.lua",               "/lib/ocui/session.lua" },
   { "ocui/storage.lua",               "/lib/ocui/storage.lua" },
   { "ocui/syntax.lua",                "/lib/ocui/syntax.lua" },
   { "ocui/textinput.lua",             "/lib/ocui/textinput.lua" },
@@ -62,9 +63,11 @@ local FILES = {
   { "apps/desktop.lua",               "/usr/bin/desktop.lua" },
   { "apps/explorer.lua",              "/usr/bin/explorer.lua" },
   { "apps/ned.lua",                   "/usr/bin/ned.lua" },
+  { "apps/ocsession.lua",             "/usr/bin/ocsession.lua" },
   { "apps/render3d.lua",              "/usr/bin/render3d.lua" },
   { "apps/taskmgr.lua",               "/usr/bin/taskmgr.lua" },
   { "apps/uidemo.lua",                "/usr/bin/uidemo.lua" },
+  { "boot/99_ocui.lua",               "/boot/99_ocui.lua" },
 }
 
 -- Copies from the first ocui version, which was copied into /home by hand.
@@ -151,6 +154,7 @@ for _, path in ipairs(OBSOLETE) do
 end
 
 print("ocui: installed to /lib/ocui and /usr/bin")
+print("      boot into the desktop: `ocsession on` (then reboot); undo: `ocsession off`")
 
 local stale = {}
 for _, path in ipairs(OLD_COPIES) do

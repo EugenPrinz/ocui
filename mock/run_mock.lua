@@ -1865,6 +1865,140 @@ do
   eq(env.files["/home/demo.lua"], "print('hi')\n", "Don't save left the file alone")
 end
 
+-- =========================================================== session ==
+
+local function readProject(path)
+  local f = io.open(projectRoot .. "/" .. path, "rb")
+  local text = f:read("a")
+  f:close()
+  return text
+end
+
+section("session: on/off and the boot script")
+do
+  local env = factory.new({})
+  install(env)
+  local session = require("ocui.session")
+  eq(session.readConfig().boot, false, "off by default")
+  check(not session.bootCheck(), "boot check: off")
+  session.setBoot(true)
+  check(env.files["/etc/ocui/session.cfg"]:find("boot = true", 1, true), "ocsession on saved")
+  check(not session.bootCheck(), "boot check: on, but the program isn't installed")
+  env.files[session.PROGRAM] = readProject("apps/ocsession.lua")
+  check(session.bootCheck(), "boot check: on and the program compiles")
+
+  -- the boot script itself
+  local shellVar
+  local realSetenv = os.setenv
+  os.setenv = function(k, v) if k == "SHELL" then shellVar = v end end
+  local boot = assert(load(readProject("boot/99_ocui.lua"), "=99_ocui"))
+  boot()
+  eq(shellVar, session.PROGRAM, "boot script points $SHELL at the session")
+  shellVar = nil
+  env.files[session.PROGRAM] = "this is not lua ("
+  boot()
+  eq(shellVar, nil, "a broken session program is not used (plain shell)")
+  env.files[session.PROGRAM] = readProject("apps/ocsession.lua")
+  session.setBoot(false)
+  boot()
+  eq(shellVar, nil, "ocsession off: plain shell")
+  os.setenv = realSetenv
+end
+
+-- Runs session.run() with scripted keys for the splash/crash screens.
+local function runSession(opts)
+  local env = factory.new({ maxW = 120, maxH = 30, events = opts.events or {},
+    maxPulls = #(opts.events or {}) + 5, endSignal = { "interrupted", 0 },
+    files = { ["/etc/ocui/session.cfg"] = opts.cfg or "{ boot = true, splash = 2 }" } })
+  install(env)
+  local session = require("ocui.session")
+  local keys = opts.keys or {}
+  local screens = {}
+  session.waitKey = function()
+    screens[#screens + 1] = env.gpu._screen()
+    local k = table.remove(keys, 1)
+    if k then return string.byte(k), 0 end
+    return nil
+  end
+  if opts.setup then opts.setup(session, env) end
+  local out, _, ok, err = captureOutput(function() return pcall(session.run) end)
+  return env, session, screens, ok, err, out
+end
+
+local EXIT_DESKTOP = factory.script(false, factory.press("f12"), factory.press("up"), factory.press("up"),
+  factory.press("up"), factory.press("enter"))
+
+section("session: splash -> desktop -> exit to the shell")
+do
+  local env, session, screens, ok, err = runSession({ events = EXIT_DESKTOP })
+  check(ok, "session ran: " .. tostring(err))
+  check(screens[1] and screens[1]:find("Starting the desktop in 2", 1, true), "splash countdown")
+  eq(env.executed[1] and env.executed[1].cmd, "ocpool", "background pool started")
+  eq(env.executed[1] and env.executed[1].args[1], "-b", "... with -b")
+  check(package.loaded["ocui.apps.desktop"].desk ~= nil, "the desktop ran")
+  eq(env.executed[2] and env.executed[2].cmd, "sh", "leaving the desktop opens the shell")
+  check(session.active, "session marked active (desktop shows Exit to shell / Reboot)")
+end
+
+section("session: a key on the splash = plain shell; exit = desktop")
+do
+  local env, session, _, ok = runSession({ keys = { " " } })
+  check(ok, "ran")
+  eq(env.executed[2] and env.executed[2].cmd, "sh", "straight to the shell")
+  check(not (env.gpu._lastFrame() or ""):find("ocui desktop", 1, true), "no desktop yet")
+  -- OpenOS runs the session again after the shell's `exit`
+  local runs = 0
+  session.runDesktop = function() runs = runs + 1; return true end
+  captureOutput(session.run)
+  eq(runs, 1, "the next run goes straight to the desktop (no splash, no second pool)")
+  eq(#env.executed, 3, "then the shell again")
+end
+
+section("session: the desktop crashes -> crash screen, log, restart or shell")
+do
+  local crashes = 0
+  local env, session, screens, ok = runSession({
+    cfg = "{ boot = true, splash = 0, backgroundPool = false, autoRestart = 5 }",
+    events = EXIT_DESKTOP,
+    keys = { "r" },
+    setup = function(session)
+      local desktop = require("ocui.apps.desktop")
+      local start = desktop.start
+      desktop.start = function(...)
+        crashes = crashes + 1
+        if crashes == 1 then error("boom in the desktop") end
+        return start(...)
+      end
+      local _ = session
+    end,
+  })
+  check(ok, "ran")
+  check(screens[1] and screens[1]:find("stopped with an error", 1, true) and screens[1]:find("boom in the desktop", 1, true),
+    "crash screen with the error")
+  check(screens[1] and screens[1]:find("restarting in 5 s", 1, true), "auto-restart countdown")
+  check((env.files[session.CRASH_LOG] or ""):find("boom in the desktop", 1, true), "written to the crash log")
+  eq(crashes, 2, "R restarted the desktop")
+  eq(env.executed[1] and env.executed[1].cmd, "sh", "exiting it afterwards: shell")
+
+  -- S goes to the shell; three crashes in a minute stop the auto-restart
+  local autoRestarts = {}
+  local env2 = runSession({
+    cfg = "{ boot = true, splash = 0, backgroundPool = false }",
+    setup = function(s)
+      s.runDesktop = function() return false, "always broken" end
+      local n = 0
+      s.crashScreen = function(_, auto)
+        n = n + 1
+        autoRestarts[n] = auto
+        return n < 3 and "restart" or "shell"
+      end
+    end,
+  })
+  eq(autoRestarts[1], 10, "first crash: auto-restart")
+  eq(autoRestarts[3], 0, "third crash within a minute: wait for a key")
+  eq(env2.executed[1] and env2.executed[1].cmd, "sh", "S: shell")
+end
+
 section("install.lua")
 do
   local f = io.open(projectRoot .. "/install.lua", "rb")
@@ -1872,7 +2006,7 @@ do
   f:close()
   local listed = {}
   for path in source:gmatch('{ "([^"]+)",') do listed[path] = true end
-  local git = io.popen('git -C "' .. projectRoot .. '" ls-files --cached --others --exclude-standard ocui apps')
+  local git = io.popen('git -C "' .. projectRoot .. '" ls-files --cached --others --exclude-standard ocui apps boot')
   local seen = 0
   if git then
     for line in git:lines() do
