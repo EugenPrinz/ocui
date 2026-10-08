@@ -287,8 +287,8 @@ The same two commands update an existing install. `install.lua`:
 - never touches your settings in `/etc/ocui`.
 
 `/tmp/install.lua <branch|tag|commit>` installs a specific version.
-GitHub's raw files can lag a push by a few minutes (the installer then
-says a file doesn't match the manifest — just run it again a bit later).
+The installer asks GitHub which commit the branch is at and downloads every
+file from that commit, so a push in the middle never mixes versions.
 If a background pool is running, restart it afterwards with
 `ocpool quit && ocpool -b`.
 

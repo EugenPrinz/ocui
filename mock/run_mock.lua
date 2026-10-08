@@ -2134,8 +2134,24 @@ do
       return true
     end
     package.loaded.internet = {
-      request = function(url)
-        local rel = url:match("/main/(.+)$")
+      request = function(url, _, headers)
+        if url:find("api.github.com", 1, true) then
+          -- the ref -> commit lookup
+          requests.api = (requests.api or 0) + 1
+          if opts.noApi then error("HTTP request failed: rate limited") end
+          check(headers and headers.Accept == "application/vnd.github.sha", "asks for the bare sha")
+          local done = false
+          return setmetatable({ response = function() return 200, "OK" end }, {
+            __call = function()
+              if done then return nil end
+              done = true
+              return string.rep("ab12", 10)
+            end,
+          })
+        end
+        local ref, rel = url:match("/ocui/([^/]+)/(.+)$")
+        requests.refs = requests.refs or {}
+        requests.refs[ref] = true
         requests[#requests + 1] = rel
         if rel == opts.failOn then error("HTTP request failed: Not Found") end
         local src = realOpen(projectRoot .. "/" .. rel, "rb")
@@ -2177,6 +2193,11 @@ do
 
   local r = runInstall()
   check(r.ok, "install ran: " .. tostring(type(r.err) == "table" and r.err.exitCode or r.err))
+  eq(r.requests.api, 1, "the branch is resolved to a commit once")
+  check(r.requests.refs[string.rep("ab12", 10)] and not r.requests.refs.main,
+    "every file comes from that commit (no stale branch cache)")
+  local rNoApi = runInstall({ noApi = true })
+  check(rNoApi.ok and rNoApi.requests.refs.main, "without the API: by branch name")
   eq(r.count, #manifest, "fresh install: every file written")
   eq(r.requests[1], "manifest.lua", "manifest first")
   local src = io.open(projectRoot .. "/ocui/pool.lua", "rb")
@@ -2196,7 +2217,7 @@ do
   local r2 = runInstall({ have = have })
   check(r2.ok, "update ran")
   eq(r2.count, 0, "nothing rewritten")
-  eq(#r2.requests, 1, "only the manifest downloaded")
+  eq(#r2.requests, 1, "only the manifest downloaded (besides the commit lookup)")
   check(r2.out:find("up to date"), "says up to date")
   check(not r2.out:find("ocpool quit", 1, true), "no restart advice when nothing changed")
 

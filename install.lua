@@ -23,7 +23,7 @@ for _, a in ipairs({ ... }) do
   if a == "-f" or a == "--force" then force = true else ref = ref or a end
 end
 ref = ref or "main"
-local BASE = "https://raw.githubusercontent.com/" .. REPO .. "/" .. ref .. "/"
+local BASE -- set once the ref is resolved to a commit, below
 
 -- Copies from the first ocui version, which was copied into /home by hand.
 -- They don't shadow the new programs (PATH is /bin:/usr/bin:/home/bin:.,
@@ -55,8 +55,10 @@ if not component.isAvailable("internet") then
 end
 local internet = require("internet")
 
-local function fetch(url)
-  local ok, handle = pcall(internet.request, url, nil, { ["user-agent"] = "ocui-install/OpenComputers" })
+local function fetch(url, headers)
+  headers = headers or {}
+  headers["user-agent"] = "ocui-install/OpenComputers"
+  local ok, handle = pcall(internet.request, url, nil, headers)
   if not ok or not handle then return nil, tostring(handle) end
   local chunks = {}
   local readOk, err = pcall(function()
@@ -80,8 +82,21 @@ local function readLocal(path)
   return text
 end
 
--- 1. the manifest
-print(string.format("ocui: checking %s (%s)", REPO, ref))
+-- 1. which commit: raw.githubusercontent.com caches a branch's files for a
+-- few minutes after a push, so files fetched by branch name can be a mix
+-- of versions. A commit's files never change: resolve the ref once
+-- (GitHub API, one request) and download everything from that commit.
+local sha = fetch("https://api.github.com/repos/" .. REPO .. "/commits/" .. ref,
+  { Accept = "application/vnd.github.sha" })
+if sha and sha:match("^%x+$") and #sha >= 40 then
+  BASE = "https://raw.githubusercontent.com/" .. REPO .. "/" .. sha .. "/"
+  print(string.format("ocui: checking %s (%s = %s)", REPO, ref, sha:sub(1, 7)))
+else
+  BASE = "https://raw.githubusercontent.com/" .. REPO .. "/" .. ref .. "/"
+  print(string.format("ocui: checking %s (%s)", REPO, ref))
+end
+
+-- 2. the manifest
 local manifestText, mErr = fetch(BASE .. "manifest.lua")
 if not manifestText then fail("manifest.lua: " .. tostring(mErr) .. "\nnothing was changed") end
 local chunk = load(manifestText, "=manifest", "t", {})
@@ -91,7 +106,7 @@ if not okManifest or type(FILES) ~= "table" or #FILES == 0 then
   fail("manifest.lua is not readable\nnothing was changed")
 end
 
--- 2. what is missing or different here
+-- 3. what is missing or different here
 local needed = {}
 for _, f in ipairs(FILES) do
   local have = not force and readLocal(f[2])
@@ -105,7 +120,7 @@ else
   print(string.format("ocui: %d of %d files to download", #needed, #FILES))
 end
 
--- 3. download everything needed, checking each file
+-- 4. download everything needed, checking each file
 local contents = {}
 for i, f in ipairs(needed) do
   io.write(string.format("  [%2d/%d] %s ... ", i, #needed, f[1]))
@@ -116,14 +131,15 @@ for i, f in ipairs(needed) do
   end
   if #body ~= f[3] or checksum(body) ~= f[4] then
     print("FAILED")
-    fail(f[1] .. ": does not match the manifest (GitHub may still be serving a cached"
-      .. " copy right after an update -- try again in a few minutes)\nnothing was changed")
+    fail(f[1] .. ": does not match the manifest (if GitHub couldn't be asked for the"
+      .. " current commit, its cache may still serve an older copy -- try again in a few"
+      .. " minutes)\nnothing was changed")
   end
   contents[i] = body
   print(string.format("%d bytes", #body))
 end
 
--- 4. write
+-- 5. write
 for i, f in ipairs(needed) do
   local dir = filesystem.path(f[2])
   if not filesystem.exists(dir) then
@@ -136,7 +152,7 @@ for i, f in ipairs(needed) do
   out:close()
 end
 
--- 5. drop cached modules so the next run loads the new code (OpenOS keeps
+-- 6. drop cached modules so the next run loads the new code (OpenOS keeps
 -- required libraries in memory between programs)
 for name in pairs(package.loaded) do
   if name == "ocui" or name:match("^ocui%.") then
