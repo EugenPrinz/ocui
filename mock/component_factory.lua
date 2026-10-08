@@ -688,7 +688,8 @@ function M.new(opts)
       clock = clock + 0.05
       return table.unpack(ev)
     end
-    clock = clock + (timeout or 1)
+    -- a pull takes at least one server tick
+    clock = clock + math.max(timeout or 1, 0.05)
     return nil
   end
 

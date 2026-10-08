@@ -19,6 +19,7 @@ component API used was checked against those exact source tags.
 | `hud` | On AR glasses: LSC charge %, stored/capacity, avg IN/OUT, a scrolling net-flow graph (green = charging, red = draining), time to full/empty, maintenance & wireless flags; below it the busy AE2 crafting CPUs with progress bar, % and ETA | Glasses Terminal + linked AR Glasses; Adapter on the LSC controller; Adapter on an ME Interface/Controller |
 | `dashboard` | On a screen: one panel per crafting CPU with output, progress %, ETA | T2+ GPU and screen; Adapter on an ME Interface/Controller |
 | `taskmgr` | On a screen: task manager — every app with state, uptime, restarts, CPU time and errors (start/stop/restart with F5/F6/F7 or Enter), the shared services and who uses them, system info (memory and energy with a memory chart, components), the pool log. Controls the background pool if one runs, else a local pool with every installed app | T3 GPU and screen, a keyboard on the screen |
+| `render3d` | On a screen: a small 3D renderer as a stress test — cube, pyramid, octahedron or torus, flat-shaded and/or wireframe, on a 160x100 half-block pixel view; shows FPS, CPU time per frame and the estimated GPU budget per frame. 1-4 shape, M mode, Space pause, arrows spin, +/- or wheel zoom, drag to rotate, Q quits | T3 GPU and screen |
 | `uidemo` | On a screen: a tour of the screen widgets — menu bar, list with columns, text fields, dialogs, split panes, status bar, running an OpenOS program and coming back. Keyboard and touch; Ctrl+Q quits | T3 GPU and screen, a keyboard on the screen |
 | `hudctl` | On a screen: control panel for the HUD (a profile per glasses terminal; show/hide panels and parts, anchor + offset per panel, width, text size, to-scale preview) and an **Energy** tab: live LSC numbers, net-flow and charge charts over 2 min / 1 h / 24 h, avg/min/max, EU in/out | T2+ GPU and screen (80x25+); an LSC for the Energy tab |
 
@@ -170,6 +171,7 @@ ocui/                 the library — copy this whole folder to /lib/ocui
   layout.lua            screen: HBox, VBox, Split
   dialog.lua            screen: message / confirm / prompt dialogs
   menu.lua              screen: pop-up menus, MenuBar
+  pixels.lua            screen: PixelView (half-block pixels, lines, triangles)
   theme.lua             screen: default palette
   app.lua               screen: a host + one widget tree, in one call
   hud.lua               glasses: Surface, Rect, Text, Bar, Graph, Group, anchors
@@ -183,6 +185,7 @@ ocui/                 the library — copy this whole folder to /lib/ocui
     hudctl.lua          app: HUD control panel + energy charts
     dashboard.lua       app: screen dashboard of crafting CPUs
     taskmgr.lua         app: task manager
+    render3d.lua        app: 3D renderer demo
     uidemo.lua          app: widget demo
 
 apps/                  programs — copy to /home or /usr/bin
@@ -191,6 +194,7 @@ apps/                  programs — copy to /home or /usr/bin
   hudctl.lua            shortcut: control panel (+ hud, or the background one)
   ae2_dashboard.lua     shortcut: dashboard alone
   taskmgr.lua           task manager (background pool, or a local one)
+  render3d.lua          shortcut: 3D renderer demo
   uidemo.lua            shortcut: widget demo
 
 install.lua            in-game installer/updater (Internet Card)

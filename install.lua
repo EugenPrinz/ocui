@@ -33,6 +33,7 @@ local FILES = {
   { "ocui/loop.lua",                  "/lib/ocui/loop.lua" },
   { "ocui/lsc.lua",                   "/lib/ocui/lsc.lua" },
   { "ocui/menu.lua",                  "/lib/ocui/menu.lua" },
+  { "ocui/pixels.lua",                "/lib/ocui/pixels.lua" },
   { "ocui/pool.lua",                  "/lib/ocui/pool.lua" },
   { "ocui/storage.lua",               "/lib/ocui/storage.lua" },
   { "ocui/textinput.lua",             "/lib/ocui/textinput.lua" },
@@ -43,6 +44,7 @@ local FILES = {
   { "ocui/apps/dashboard.lua",        "/lib/ocui/apps/dashboard.lua" },
   { "ocui/apps/hud.lua",              "/lib/ocui/apps/hud.lua" },
   { "ocui/apps/hudctl.lua",           "/lib/ocui/apps/hudctl.lua" },
+  { "ocui/apps/render3d.lua",         "/lib/ocui/apps/render3d.lua" },
   { "ocui/apps/taskmgr.lua",          "/lib/ocui/apps/taskmgr.lua" },
   { "ocui/apps/uidemo.lua",           "/lib/ocui/apps/uidemo.lua" },
   { "ocui/services/crafting.lua",     "/lib/ocui/services/crafting.lua" },
@@ -51,6 +53,7 @@ local FILES = {
   { "apps/hud.lua",                   "/usr/bin/hud.lua" },
   { "apps/hudctl.lua",                "/usr/bin/hudctl.lua" },
   { "apps/ae2_dashboard.lua",         "/usr/bin/ae2_dashboard.lua" },
+  { "apps/render3d.lua",              "/usr/bin/render3d.lua" },
   { "apps/taskmgr.lua",               "/usr/bin/taskmgr.lua" },
   { "apps/uidemo.lua",                "/usr/bin/uidemo.lua" },
 }

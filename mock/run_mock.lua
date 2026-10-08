@@ -1459,6 +1459,65 @@ do
   eq(bg.apps.alpha.state, "running", "background apps keep running after taskmgr quits")
 end
 
+-- ========================================================== render3d ==
+
+section("pixels: rasterizing and run-merged drawing")
+do
+  local env = factory.new({ maxW = 40, maxH = 10 })
+  install(env)
+  local PixelView = require("ocui.pixels")
+  local Canvas = require("ocui.canvas")
+  local v = PixelView.new({ w = 40, h = 10 })
+  v:begin()
+  v:fillTriangle(0, 0, 20, 0, 0, 20, 0xFF0000)
+  local n = 0
+  for i = 1, v.pw * v.ph do if v.pix[i] then n = n + 1 end end
+  check(n > 180 and n < 230, "triangle covers about half of 20x20 (" .. n .. " px)")
+  v:begin()
+  for y = 4, 11 do v:span(10, 29, y, 0x00FF00) end           -- 20x8 px block = 20x4 cells
+  v:line(0, 19, 39, 19, 0xFFFFFF)                            -- bottom pixel row of cell row 9
+  v:finish()
+  eq(v.drawn[1] .. "," .. v.drawn[2] .. "," .. v.drawn[3] .. "," .. v.drawn[4], "0,4,39,19", "drawn bounds")
+  local calls0 = env.gpu._calls()
+  v:draw(Canvas.new(env.gpu, 0, 0, 40, 10))
+  local calls = env.gpu._calls() - calls0
+  -- 1 fill + per run (set + colors): 4 block rows + 1 line row
+  check(calls <= 16, "solid areas drawn as one run per row (" .. calls .. " GPU calls)")
+  local fg, bg, ch = env.gpu._cell(11, 3)
+  eq(ch .. string.format("%06X", bg), " 00FF00", "block cell = space on green")
+  fg, bg, ch = env.gpu._cell(5, 10)
+  eq(ch, "▄", "line in the lower half of its cell")
+  eq(string.format("%06X/%06X", fg, bg), "FFFFFF/000000", "line color on the background")
+  eq(PixelView.quantize(0x4C, 0x8B, 0xF5), 0x3392FF, "colors snap to the T3 palette")
+end
+
+section("render3d: frames, shapes, modes, cost per frame")
+do
+  local events = {}
+  local function add(list) for _, e in ipairs(list) do events[#events + 1] = e end end
+  for _ = 1, 20 do events[#events + 1] = false end
+  add(factory.press("4")); add(factory.press("m"))
+  events[#events + 1] = { "touch", "screen-1", 80, 25, 0, "player" }
+  events[#events + 1] = { "drag", "screen-1", 90, 25, 0, "player" }
+  events[#events + 1] = { "drop", "screen-1", 90, 25, 0, "player" }
+  for _ = 1, 25 do events[#events + 1] = false end
+  add(factory.press("q"))
+  local env = factory.new({ maxW = 160, maxH = 50, events = events, maxPulls = #events + 3,
+    endSignal = { "interrupted", 0 } })
+  local b0 = env.gpu._budget()
+  local ok, err = runApp("apps/render3d.lua", env)
+  check(ok, "render3d ran: " .. tostring(err))
+  local r3d = package.loaded["ocui.apps.render3d"]
+  check((r3d.frames or 0) >= 40, "one frame per pull (" .. tostring(r3d.frames) .. ")")
+  check(r3d.fps and r3d.fps > 15, "~20 FPS on the virtual clock (" .. tostring(r3d.fps) .. ")")
+  local perFrame = (env.gpu._budget() - b0) / r3d.frames
+  check(perFrame < 0.8, string.format("only the object's box is copied: %.2f budget per frame (full screen = 2.0)",
+    perFrame))
+  local frame = env.gpu._lastFrame() or ""
+  check(frame:find("torus wire", 1, true), "4 = torus, M = wireframe (status line)")
+  check(env.pulls() < #events + 3, "Q quit")
+end
+
 section("install.lua")
 do
   local f = io.open(projectRoot .. "/install.lua", "rb")

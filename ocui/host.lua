@@ -37,6 +37,11 @@ Host.__index = Host
 -- A frame whose changed area exceeds this share of the screen is copied
 -- with one full-screen bitblt instead of piece by piece.
 Host.FULL_COPY_SHARE = 0.6
+-- Call budget of a dirty full-screen VRAM->screen bitblt on a T3 GPU
+-- (bitbltCost 0.5 * 2^tier); used for the cost estimate in host.stats.
+Host.BITBLT_COST = 2.0
+
+local clock = os and os.clock or function() return 0 end
 local MAX_RECTS = 6
 local MERGE_SLACK = 40 -- cells of overdraw accepted to merge two rects
 
@@ -58,6 +63,9 @@ function Host.new(opts)
     focusVisible = false,
     buffer = 0,
     frames = 0,
+    -- per-frame numbers for apps that want to show them: cpu = seconds the
+    -- last repaint took, cost = its estimated call budget, totalCost
+    stats = { cpu = 0, cost = 0, totalCost = 0 },
   }, Host)
 end
 
@@ -578,10 +586,14 @@ function Host:flush()
   self.damageList = {}
   if self.suspended or not self.mounted or #rects == 0 then return end
   local gpu, buf = self.gpu, self.buffer
+  local t0 = clock()
   local total = 0
   for _, r in ipairs(rects) do total = total + area(r) end
   local full = total >= self.w * self.h * Host.FULL_COPY_SHARE
-  if full then rects = { { x = 0, y = 0, w = self.w, h = self.h } } end
+  if full then
+    rects = { { x = 0, y = 0, w = self.w, h = self.h } }
+    total = self.w * self.h
+  end
 
   self.rendering = true
   local ok, err = pcall(function()
@@ -600,6 +612,10 @@ function Host:flush()
     end
   end
   self.frames = self.frames + 1
+  local stats = self.stats
+  stats.cpu = clock() - t0
+  stats.cost = buf ~= 0 and Host.BITBLT_COST * total / (self.w * self.h) or 0
+  stats.totalCost = stats.totalCost + stats.cost
   if not ok then error(err, 0) end
 end
 
