@@ -13,6 +13,8 @@
 -- when it has no scripted signal to return, so periodic tasks fire on
 -- schedule without real waiting.
 
+local memfs = require("memfs")
+
 local M = {}
 
 -- ------------------------------------------------------------- fake GPU --
@@ -41,21 +43,43 @@ local function dumpGrid(buf)
   return table.concat(lines, "\n")
 end
 
+-- Call-budget costs of a T3 GPU (OC GraphicsCard.scala), charged only
+-- when drawing on the screen itself (buffer 0); drawing into a VRAM
+-- buffer is free. A T3 computer gets 1.5 per tick.
+M.COSTS = {
+  set = 1 / 256, fill = 1 / 128, copy = 1 / 64,
+  setForeground = 1 / 128, setBackground = 1 / 128, setPaletteColor = 1 / 16,
+}
+M.BITBLT_COST = 2.0 -- dirty full-screen-sized source buffer to the screen
+M.TICK_BUDGET = 1.5
+
 local function newGpu(maxW, maxH, opts, address, screen)
+  local function newBuffer(w, h)
+    return { w = w, h = h, grid = newGrid(w, h), fg = 0xFFFFFF, bg = 0x000000, dirty = true }
+  end
   local state = {
     screen = screen,
     maxW = maxW, maxH = maxH,
     w = maxW, h = maxH,
-    fg = 0xFFFFFF, bg = 0x000000,
     active = 0,
-    buffers = { [0] = { w = maxW, h = maxH, grid = newGrid(maxW, maxH) } },
+    buffers = { [0] = newBuffer(maxW, maxH) },
     nextBuf = 1,
     calls = 0,
+    budget = 0,
+    vramFree = opts.vram or (3 * maxW * maxH), -- T3: three screens' worth
     lastFrame = nil,
   }
 
   local gpu = { type = "gpu", address = address }
   local function count() state.calls = state.calls + 1 end
+  local function charge(op)
+    if state.active == 0 then
+      state.budget = state.budget + M.COSTS[op]
+    else
+      state.buffers[state.active].dirty = true
+    end
+  end
+  local function active() return state.buffers[state.active] end
 
   function gpu.getScreen() return state.screen end
 
@@ -65,18 +89,30 @@ local function newGpu(maxW, maxH, opts, address, screen)
   function gpu.setResolution(w, h)
     count()
     state.w, state.h = w, h
-    state.buffers[0] = { w = w, h = h, grid = newGrid(w, h) }
+    state.buffers[0] = newBuffer(w, h)
     return true
   end
 
-  function gpu.setBackground(c) count(); local old = state.bg; state.bg = c; return old end
-  function gpu.setForeground(c) count(); local old = state.fg; state.fg = c; return old end
-  function gpu.getBackground() return state.bg end
-  function gpu.getForeground() return state.fg end
+  function gpu.setBackground(c)
+    count(); charge("setBackground")
+    local b = active()
+    local old = b.bg
+    b.bg = c
+    return old
+  end
+  function gpu.setForeground(c)
+    count(); charge("setForeground")
+    local b = active()
+    local old = b.fg
+    b.fg = c
+    return old
+  end
+  function gpu.getBackground() return active().bg end
+  function gpu.getForeground() return active().fg end
 
   state.palette = {}
   function gpu.setPaletteColor(i, color)
-    count()
+    count(); charge("setPaletteColor")
     local old = state.palette[i]
     state.palette[i] = color
     return old
@@ -94,9 +130,11 @@ local function newGpu(maxW, maxH, opts, address, screen)
     function gpu.allocateBuffer(w, h)
       w = w or state.w
       h = h or state.h
+      if w * h > state.vramFree then return nil, "not enough video memory" end
+      state.vramFree = state.vramFree - w * h
       local idx = state.nextBuf
       state.nextBuf = state.nextBuf + 1
-      state.buffers[idx] = { w = w, h = h, grid = newGrid(w, h) }
+      state.buffers[idx] = newBuffer(w, h)
       return idx
     end
   else
@@ -105,15 +143,17 @@ local function newGpu(maxW, maxH, opts, address, screen)
 
   function gpu.freeBuffer(i)
     i = i or state.active
-    if i == 0 then return false end
+    if i == 0 or not state.buffers[i] then return false end
+    state.vramFree = state.vramFree + state.buffers[i].w * state.buffers[i].h
     state.buffers[i] = nil
     if state.active == i then state.active = 0 end
     return true
   end
+  function gpu.freeMemory() return state.vramFree end
 
   function gpu.fill(x, y, w, h, char)
-    count()
-    local buf = state.buffers[state.active]
+    count(); charge("fill")
+    local buf = active()
     -- A full-screen fill on the screen starts a new frame (no-VRAM path) or
     -- is the exit-time clear: snapshot what was shown just before it.
     if state.active == 0 and x == 1 and y == 1 and w >= buf.w and h >= buf.h then
@@ -123,7 +163,7 @@ local function newGpu(maxW, maxH, opts, address, screen)
       if buf.grid[row] then
         for col = x, x + w - 1 do
           if buf.grid[row][col] then
-            buf.grid[row][col] = { ch = char, fg = state.fg, bg = state.bg }
+            buf.grid[row][col] = { ch = char, fg = buf.fg, bg = buf.bg }
           end
         end
       end
@@ -133,15 +173,41 @@ local function newGpu(maxW, maxH, opts, address, screen)
 
   -- One grid cell per Unicode codepoint, as on a real screen.
   function gpu.set(x, y, str, vertical)
-    count()
-    local buf = state.buffers[state.active]
+    count(); charge("set")
+    local buf = active()
     local col, rowIdx = x, y
     for _, code in utf8.codes(str) do
       local row = buf.grid[rowIdx]
       if row and row[col] then
-        row[col] = { ch = utf8.char(code), fg = state.fg, bg = state.bg }
+        row[col] = { ch = utf8.char(code), fg = buf.fg, bg = buf.bg }
       end
       if vertical then rowIdx = rowIdx + 1 else col = col + 1 end
+    end
+    return true
+  end
+
+  function gpu.get(x, y)
+    local c = active().grid[y] and active().grid[y][x]
+    if not c then return nil end
+    return c.ch, c.fg, c.bg
+  end
+
+  function gpu.copy(x, y, w, h, tx, ty)
+    count(); charge("copy")
+    local buf = active()
+    local snap = {}
+    for row = y, y + h - 1 do
+      snap[row] = {}
+      for col = x, x + w - 1 do
+        local c = buf.grid[row] and buf.grid[row][col]
+        snap[row][col] = c and { ch = c.ch, fg = c.fg, bg = c.bg }
+      end
+    end
+    for row = y, y + h - 1 do
+      for col = x, x + w - 1 do
+        local d = buf.grid[row + ty]
+        if d and d[col + tx] and snap[row][col] then d[col + tx] = snap[row][col] end
+      end
     end
     return true
   end
@@ -153,8 +219,17 @@ local function newGpu(maxW, maxH, opts, address, screen)
     col, row = col or 1, row or 1
     fromCol, fromRow = fromCol or 1, fromRow or 1
     local sb, db = state.buffers[src], state.buffers[dst]
-    w = w or sb.w
-    h = h or sb.h
+    assert(sb and db, "bitblt: no such buffer")
+    w = w or db.w
+    h = h or db.h
+    if dst == 0 and src ~= 0 then
+      -- OC charges by the size of the source buffer, if it changed
+      state.budget = state.budget + (sb.dirty
+        and M.BITBLT_COST * (sb.w * sb.h) / (state.maxW * state.maxH) or 0.001)
+      sb.dirty = false
+    elseif dst ~= 0 then
+      db.dirty = true
+    end
     for dy = 0, h - 1 do
       local srow = sb.grid[fromRow + dy]
       local drow = db.grid[row + dy]
@@ -178,6 +253,15 @@ local function newGpu(maxW, maxH, opts, address, screen)
 
   -- Test helpers (not part of the real GPU API).
   function gpu._calls() return state.calls end
+  -- Call budget spent on the screen so far (see M.COSTS); reset with
+  -- _resetBudget().
+  function gpu._budget() return state.budget end
+  function gpu._resetBudget() state.budget = 0 end
+  function gpu._buffers()
+    local n = 0
+    for i in pairs(state.buffers) do if i ~= 0 then n = n + 1 end end
+    return n
+  end
   -- The last complete frame shown before the app cleared the screen.
   function gpu._lastFrame() return state.lastFrame end
   -- fg, bg of a screen cell (1-based), for color assertions
@@ -440,10 +524,15 @@ end
 
 -- ---------------------------------------------------------------- module --
 
--- opts: maxW, maxH, noVram, cpus (me_interface defs; nil = no ME),
+-- opts: maxW, maxH, noVram, vram (cells), gpus (count, default 1; gpu-i is
+--       bound to screen-i, which has keyboard kb-i unless noKeyboards),
+--       cpus (me_interface defs; nil = no ME),
 --       lsc (def; nil = none), glasses (count, default 0),
 --       events (scripted signals, consumed one per pull; `false` = let the
---       pull time out), maxPulls (then 'q' is pressed).
+--       pull time out), maxPulls (then 'q' is pressed),
+--       files (path -> content, the initial file system),
+--       onExecute(cmd, ...) (what shell.execute does; default: prints a
+--       line on screen-1).
 function M.new(opts)
   opts = opts or {}
   local clock = 1000 -- uptime starts at an arbitrary non-zero value
@@ -463,7 +552,12 @@ function M.new(opts)
     table.insert(byType[proxy.type], proxy)
   end
 
-  for _, g in ipairs(gpus) do register(g, g.address) end
+  for i, g in ipairs(gpus) do
+    register(g, g.address)
+    local kbs = opts.noKeyboards and {} or { "kb-" .. i }
+    register({ type = "screen", getKeyboards = function() return kbs end }, "screen-" .. i)
+    if not opts.noKeyboards then register({ type = "keyboard" }, "kb-" .. i) end
+  end
 
   if opts.cpus then
     for _, def in ipairs(opts.cpus) do def.startAt = (def.startAt or 0) + clock end
@@ -533,8 +627,16 @@ function M.new(opts)
   -- `false` script entry (or running past it) is a timeout. After
   -- maxPulls, endSignal is returned (quit), and a loop that still doesn't
   -- stop is aborted.
-  function event.pull(timeout, ...)
-    local filters = table.pack(...)
+  function event.pull(...)
+    local args = table.pack(...)
+    local timeout = args[1]
+    local filters
+    if type(timeout) == "string" then -- event.pull(name, ...): no timeout
+      timeout = nil
+      filters = table.pack(table.unpack(args, 1, args.n))
+    else
+      filters = table.pack(table.unpack(args, 2, args.n))
+    end
     pulls = pulls + 1
     if pulls > maxPulls + 200 then
       error("mock: event loop did not stop after the end signal")
@@ -545,6 +647,20 @@ function M.new(opts)
           table.remove(queue, i)
           clock = clock + 0.05
           return table.unpack(sig, 1, sig.n)
+        end
+      end
+      -- With no timeout (a program waiting for a key, say), take the next
+      -- matching scripted signal; the ones before it are dropped, as OpenOS
+      -- drops what a filtered pull doesn't want.
+      if timeout == nil then
+        while scriptIndex < #script do
+          scriptIndex = scriptIndex + 1
+          local ev = script[scriptIndex]
+          if type(ev) == "function" then ev = ev() end
+          if ev and matches(ev, filters) then
+            clock = clock + 0.05
+            return table.unpack(ev)
+          end
         end
       end
       clock = clock + (timeout or 1)
@@ -573,6 +689,7 @@ function M.new(opts)
 
   -- In-memory storage backend for ocui.storage.
   local files = {}
+  for path, content in pairs(opts.files or {}) do files[path] = content end
   local storage = {}
   function storage.read(path) return files[path] end
   function storage.write(path, text) files[path] = text; return true end
@@ -580,18 +697,37 @@ function M.new(opts)
   function storage.ensureDir() end
   function storage.exists(path) return files[path] ~= nil end
 
+  -- The file system works on the same files; the project's app
+  -- directory (found through package.path by `ocpool list`) is faked.
   local extraApps = opts.extraApps or {}
-  local filesystem = {}
-  function filesystem.isDirectory(dir) return dir:match("ocui/apps$") ~= nil end
+  local filesystem = memfs.new(files, now)
+  local fsIsDirectory, fsList = filesystem.isDirectory, filesystem.list
+  function filesystem.isDirectory(dir)
+    return dir:match("ocui/apps$") ~= nil or fsIsDirectory(dir)
+  end
   function filesystem.list(dir)
+    if not dir:match("ocui/apps$") then return fsList(dir) end
     local names = { "dashboard.lua", "hud.lua", "hudctl.lua" }
     for _, n in ipairs(extraApps) do table.insert(names, n .. ".lua") end
     local i = 0
     return function() i = i + 1; return names[i] end
   end
-  function filesystem.exists(path) return files[path] ~= nil end
 
   local tty = { screen = function() return opts.shellScreen or "screen-1" end }
+
+  -- shell.execute runs "programs" synchronously, like OpenOS.
+  local executed = {}
+  local shell = {}
+  function shell.execute(cmd, _, ...)
+    table.insert(executed, { cmd = cmd, args = table.pack(...) })
+    if opts.onExecute then return opts.onExecute(cmd, ...) end
+    gpu.set(1, 1, "program " .. tostring(cmd) .. " ran")
+    return true
+  end
+  local termCalls = { clear = 0 }
+  local term = {}
+  function term.clear() termCalls.clear = termCalls.clear + 1 end
+  function term.isAvailable() return true end
 
   local threads = {}
   local thread = {}
@@ -611,6 +747,10 @@ function M.new(opts)
     files = files,
     filesystem = filesystem,
     tty = tty,
+    shell = shell,
+    term = term,
+    executed = executed,
+    termCalls = termCalls,
     thread = thread,
     threads = threads,
     pushed = pushed,
@@ -629,6 +769,78 @@ function M.new(opts)
     pulls = function() return pulls end,
     clock = now,
   }
+end
+
+-- ---------------------------------------------------------- key signals --
+
+local NAMED = {
+  escape = { 1, 27 }, back = { 14, 8 }, tab = { 15, 9 }, enter = { 28, 13 }, space = { 57, 32 },
+  f1 = { 59, 0 }, f2 = { 60, 0 }, f3 = { 61, 0 }, f4 = { 62, 0 }, f5 = { 63, 0 }, f10 = { 68, 0 },
+  home = { 199, 0 }, up = { 200, 0 }, pageUp = { 201, 0 }, left = { 203, 0 }, right = { 205, 0 },
+  ["end"] = { 207, 0 }, down = { 208, 0 }, pageDown = { 209, 0 }, insert = { 210, 0 },
+  delete = { 211, 127 },
+}
+local LETTER_CODES = {
+  q = 16, w = 17, e = 18, r = 19, t = 20, y = 21, u = 22, i = 23, o = 24, p = 25,
+  a = 30, s = 31, d = 32, f = 33, g = 34, h = 35, j = 36, k = 37, l = 38,
+  z = 44, x = 45, c = 46, v = 47, b = 48, n = 49, m = 50,
+  ["1"] = 2, ["2"] = 3, ["3"] = 4, ["4"] = 5, ["5"] = 6, ["6"] = 7, ["7"] = 8,
+  ["8"] = 9, ["9"] = 10, ["0"] = 11, [" "] = 57,
+}
+local MOD_CODES = { ctrl = 29, shift = 42, alt = 56 }
+
+-- Signals for typing `text` (UTF-8) on keyboard `kb` (default "kb-1"):
+-- one key_down per character, as OC sends them.
+function M.typeText(text, kb)
+  kb = kb or "kb-1"
+  local out = {}
+  for _, code in utf8.codes(text) do
+    local ch = utf8.char(code)
+    out[#out + 1] = { "key_down", kb, code, LETTER_CODES[ch:lower()] or 0, "player" }
+  end
+  return out
+end
+
+-- Signals for a key or combo like "enter", "ctrl+s", "shift+tab", "a":
+-- modifier downs, the key, modifier ups.
+function M.press(combo, kb)
+  kb = kb or "kb-1"
+  local mods, key = {}, combo
+  for mod in combo:gmatch("(%a+)%+") do mods[#mods + 1] = mod end
+  key = combo:match("([^+]+)$")
+  local out = {}
+  local isMod = {}
+  for _, m in ipairs(mods) do
+    isMod[m] = true
+    out[#out + 1] = { "key_down", kb, 0, MOD_CODES[m], "player" }
+  end
+  local code, char
+  if NAMED[key] then
+    code, char = NAMED[key][1], NAMED[key][2]
+  else
+    code, char = LETTER_CODES[key] or 0, string.byte(key)
+    if isMod.shift then char = string.byte(key:upper()) end
+  end
+  if isMod.ctrl and key:match("^%a$") then char = string.byte(key:lower()) - 96 end
+  out[#out + 1] = { "key_down", kb, char, code, "player" }
+  for i = #mods, 1, -1 do
+    out[#out + 1] = { "key_up", kb, 0, MOD_CODES[mods[i]], "player" }
+  end
+  return out
+end
+
+-- Concatenates signal lists (and single signals / false timeouts) into
+-- one events script.
+function M.script(...)
+  local out = {}
+  for _, part in ipairs({ ... }) do
+    if type(part) == "table" and type(part[1]) == "table" then
+      for _, sig in ipairs(part) do out[#out + 1] = sig end
+    else
+      out[#out + 1] = part
+    end
+  end
+  return out
 end
 
 return M

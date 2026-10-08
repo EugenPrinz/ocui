@@ -93,14 +93,17 @@ function Canvas:fillRect(x, y, w, h, bg, char)
   self.gpu.fill(col, row, cw, ch, char or " ")
 end
 
--- Left-edge clipping (drawing text that starts before the clip region) is
--- not supported -- none of ocui's own widgets ever position text with a
--- negative offset into their own clip, so this only needs to handle the
--- common case: vertical clipping and right-edge truncation.
+-- Draws `str` at (x, y), clipped on every side (a partial redraw can
+-- start in the middle of a line of text).
 function Canvas:text(x, y, str, fg, bg)
   local ax, ay = self.x + x, self.y + y
   if ay < self.clipY or ay >= self.clipY + self.clipH then return end
-  if ax < self.clipX then return end
+  if ax < self.clipX then
+    local skip = self.clipX - ax
+    if util.len(str) <= skip then return end
+    str = util.sub(str, skip + 1)
+    ax = self.clipX
+  end
   local maxCols = (self.clipX + self.clipW) - ax
   if maxCols <= 0 then return end
   if util.len(str) > maxCols then str = util.truncate(str, maxCols) end
@@ -108,6 +111,15 @@ function Canvas:text(x, y, str, fg, bg)
   self:setForeground(fg)
   self:setBackground(bg or self.bg)
   self.gpu.set(ax + 1, ay + 1, str)
+end
+
+-- True if the local rect (x, y, w, h) is at least partly inside the clip:
+-- containers skip children that are not, so a partial redraw only walks
+-- the part of the tree it touches.
+function Canvas:intersects(x, y, w, h)
+  local ax, ay = self.x + x, self.y + y
+  return ax < self.clipX + self.clipW and ax + w > self.clipX
+    and ay < self.clipY + self.clipH and ay + h > self.clipY
 end
 
 -- Draws `str` downwards from (x, y), one codepoint per row, in a single
@@ -126,15 +138,20 @@ function Canvas:vtext(x, y, str, fg, bg)
   self.gpu.set(ax + 1, ay + first, table.concat(chars, "", first, last), true)
 end
 
+-- Horizontal line of `char` (default "─") in color `color` on the
+-- surface background.
 function Canvas:hline(x, y, w, color, char)
-  self:fillRect(x, y, w, 1, color, char or "\226\148\128") -- "─"
+  local col, row, cw = self:clipToAbs(x, y, w, 1)
+  if not col then return end
+  self:setForeground(color)
+  self:setBackground(self.bg)
+  self.gpu.fill(col, row, cw, 1, char or "\226\148\128") -- "─"
 end
 
+-- Vertical line (default "│"), one GPU call.
 function Canvas:vline(x, y, h, color, char)
-  char = char or "\226\148\130" -- "│"
-  for i = 0, h - 1 do
-    self:text(x, y + i, char, color)
-  end
+  if h <= 0 then return end
+  self:vtext(x, y, string.rep(char or "\226\148\130", h), color)
 end
 
 -- Draws a single-line box border around (x, y, w, h) with an optional

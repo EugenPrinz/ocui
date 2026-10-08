@@ -16,6 +16,7 @@
 --     while true do work(); Loop.sleep(5) end
 --   end)
 --   loop:on("touch", onTouch)              -- handler(name, ...signal args)
+--   loop:idle(flushScreen)                 -- after each round, before waiting
 --   loop:run()                             -- until loop:stop(), 'q', Ctrl+C
 --
 -- Inside a task, never call event.pull()/os.sleep(): they block the whole
@@ -49,6 +50,7 @@ function Loop.new(opts)
   return setmetatable({
     entries = {},
     handlers = {},
+    idlers = {},
     quitChar = quitChar,
     stopOnInterrupt = stopOnInterrupt,
     onError = opts.onError,
@@ -109,6 +111,16 @@ function Loop:off(handler)
   handler.cancelled = true
 end
 
+-- fn() runs once per loop round, after the due tasks and before the loop
+-- blocks waiting for the next signal -- the place to flush work batched
+-- up by the tasks and handlers of that round (e.g. one screen update for
+-- many widget changes). Must not sleep/yield. Cancel with off().
+function Loop:idle(fn, owner)
+  local h = { fn = fn, owner = owner, cancelled = false }
+  table.insert(self.idlers, h)
+  return h
+end
+
 -- Cancels every task and handler registered with this owner.
 function Loop:cancelOwner(owner)
   for _, e in ipairs(self.entries) do
@@ -118,6 +130,9 @@ function Loop:cancelOwner(owner)
     for _, h in ipairs(list) do
       if h.owner == owner then h.cancelled = true end
     end
+  end
+  for _, h in ipairs(self.idlers) do
+    if h.owner == owner then h.cancelled = true end
   end
 end
 
@@ -261,10 +276,27 @@ function Loop:dispatch(signal)
   end
 end
 
+function Loop:runIdle()
+  local live = {}
+  for _, h in ipairs(self.idlers) do
+    if not h.cancelled then table.insert(live, h) end
+  end
+  self.idlers = live
+  for _, h in ipairs(live) do
+    if not self.running then return end
+    if not h.cancelled then
+      local ok, err = xpcall(h.fn, traceback)
+      if not ok then self:fail(err, h.owner, h) end
+    end
+  end
+end
+
 function Loop:run()
   self.running = true
   while self.running do
     self:runDue()
+    if not self.running then break end
+    self:runIdle()
     if not self.running then break end
     local timeout = self:timeUntilNext()
     -- OpenOS raises "interrupted" out of event.pull on Ctrl+Alt+C (a hard

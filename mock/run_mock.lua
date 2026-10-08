@@ -35,6 +35,8 @@ local function install(env)
   package.loaded["filesystem"] = env.filesystem
   package.loaded["tty"] = env.tty
   package.loaded["thread"] = env.thread
+  package.loaded["shell"] = env.shell
+  package.loaded["term"] = env.term
   for name in pairs(package.loaded) do
     if name:match("^ocui%.") then package.loaded[name] = nil end
   end
@@ -1040,6 +1042,327 @@ do
 end
 
 -- ============================================================= install ==
+
+-- ========================================================== foundation ==
+
+section("unit: util text helpers")
+do
+  install(factory.new({}))
+  local util = require("ocui.util")
+  eq(util.sub("приветмир", 3, 6), "ивет", "sub counts characters")
+  eq(util.sub("abc", 2), "bc", "sub to the end")
+  eq(util.char(65), "A", "char ascii")
+  eq(util.char(1078), "ж", "char cyrillic")
+  eq(util.char(0x2500), "─", "char 3-byte")
+  eq(util.pad("ab", 4, "right"), "  ab", "pad right")
+  eq(util.pad("abcdef", 3), "abc", "pad truncates")
+  eq(util.ellipsis("abcdef", 4), "abc…", "ellipsis")
+  local lines = util.wrap("one two three four", 9)
+  eq(#lines, 3, "wrap line count")
+  eq(lines[1], "one two", "wrap first line")
+  eq(#util.wrap("a\n\nb", 10), 3, "wrap keeps blank lines")
+end
+
+section("unit: key events")
+do
+  install(factory.new({}))
+  local keys = require("ocui.keys")
+  local ev = keys.event(97, 30, {})
+  eq(ev.text, "a", "typed letter")
+  eq(ev.combo, "a", "plain combo")
+  ev = keys.event(19, 31, { ctrl = true })
+  eq(ev.text, nil, "ctrl+s types nothing")
+  eq(ev.combo, "ctrl+s", "ctrl combo name")
+  ev = keys.event(1078, 39, {})
+  eq(ev.text, "ж", "cyrillic char from its code")
+  ev = keys.event(64, 16, { ctrl = true, alt = true })
+  eq(ev.text, "@", "AltGr (ctrl+alt) still types")
+  ev = keys.event(13, 28, {})
+  eq(ev.name, "enter", "enter named")
+  eq(ev.text, nil, "enter is not text")
+  eq(keys.event(9, 15, { shift = true }).combo, "shift+tab", "shift+tab")
+end
+
+section("canvas: text clipped on the left")
+do
+  local env = factory.new({ maxW = 20, maxH = 3 })
+  install(env)
+  local Canvas = require("ocui.canvas")
+  local c = Canvas.new(env.gpu, 0, 0, 20, 3, 5, 0, 5, 1, {})
+  c:text(2, 0, "abcdefghij", 0xFFFFFF, 0)
+  eq(env.gpu._screen():sub(1, 12), "     defgh  ", "only the clipped middle is drawn")
+end
+
+section("mock filesystem")
+do
+  local env = factory.new({ files = { ["/home/a.txt"] = "hello" } })
+  install(env)
+  local fs = env.filesystem
+  check(fs.isDirectory("/home"), "parent of a file is a directory")
+  fs.makeDirectory("/home/sub/deep")
+  local names = {}
+  for n in fs.list("/home") do names[#names + 1] = n end
+  eq(table.concat(names, ","), "a.txt,sub/", "list marks directories")
+  local h = fs.open("/home/b.txt", "w")
+  h:write("xyz")
+  h:close()
+  eq(env.files["/home/b.txt"], "xyz", "files written through the API are in the shared table")
+  eq(fs.size("/home/b.txt"), 3, "size")
+  check(fs.rename("/home/sub", "/home/moved"), "rename directory")
+  check(fs.isDirectory("/home/moved/deep"), "subdirectories move along")
+  check(fs.remove("/home"), "recursive remove")
+  check(not fs.exists("/home/a.txt"), "removed")
+end
+
+section("host: damage rectangles merge")
+do
+  install(factory.new({}))
+  local Host = require("ocui.host")
+  local h = Host.new({})
+  h.w, h.h = 160, 50
+  h:damage(0, 3, 70, 1)
+  h:damage(0, 4, 70, 1)
+  eq(#h.damageList, 1, "adjacent rows merge")
+  h:damage(0, 30, 70, 1)
+  eq(#h.damageList, 2, "distant rows stay apart")
+  h:damage(-5, 49, 400, 9)
+  local r = h.damageList[#h.damageList]
+  eq(r.x .. "," .. r.w .. "," .. r.h, "0,160,1", "clipped to the screen")
+  check(h.framePending, "a frame is pending")
+end
+
+-- Runs uidemo on a 160x50 screen with the given events script; returns
+-- env and the app module. `interrupted` ends the run.
+local function runDemo(events, opts)
+  opts = opts or {}
+  opts.maxW, opts.maxH = 160, 50
+  opts.events = events
+  opts.endSignal = { "interrupted", 0 }
+  local env = factory.new(opts)
+  local ok, err = runApp("apps/uidemo.lua", env)
+  check(ok, "uidemo ran: " .. tostring(err))
+  return env, package.loaded["ocui.apps.uidemo"]
+end
+
+local function screenOf(env) return env.gpu._screen() end
+
+section("uidemo: first frame, keyboard navigation, partial redraw cost")
+do
+  local env
+  local seen = {}
+  local function snap(key) return function() seen[key] = screenOf(env); return false end end
+  local function budget(key) return function() seen[key] = env.gpu._budget(); env.gpu._resetBudget(); return false end end
+  local events = factory.script(
+    snap("start"), budget("startup"),
+    factory.press("down"), budget("down"), snap("afterDown"),
+    factory.press("tab"), factory.typeText("Xq"), budget("typing"), snap("typed"),
+    factory.press("enter"), snap("saved"),
+    factory.press("ctrl+q")
+  )
+  env = factory.new({ maxW = 160, maxH = 50, events = events, endSignal = { "interrupted", 0 } })
+  local ok, err = runApp("apps/uidemo.lua", env)
+  check(ok, "uidemo ran: " .. tostring(err))
+  local demo = package.loaded["ocui.apps.uidemo"]
+  check(seen.start and findText(seen.start, "File"), "menu bar drawn")
+  check(seen.start and findText(seen.start, "Copper"), "list rows drawn")
+  check(seen.start and findText(seen.start, "Аметист"), "UTF-8 item drawn")
+  check(seen.start and findText(seen.start, "^Q Quit"), "status bar hints drawn")
+  check(seen.startup and seen.startup <= 2.2, "startup is one full-screen copy (budget " .. tostring(seen.startup) .. ")")
+  check(seen.down and seen.down < 0.2,
+    "moving the selection repaints a few rows only (budget " .. tostring(seen.down) .. ", full screen = 2.0)")
+  eq(demo.list.selected, 2, "Down selects the next row")
+  check(seen.typing and seen.typing < 0.3, "typing costs little (budget " .. tostring(seen.typing) .. ")")
+  check(seen.typed and findText(seen.typed, "TinXq"), "typed text in the name field, 'q' did not quit")
+  check(seen.saved and findText(seen.saved, "Saved TinXq"), "Enter saved through onSubmit")
+  eq(demo.list.items[2].name, "TinXq", "item renamed")
+  check(env.pulls() < #events + 5, "Ctrl+Q quit the app")
+end
+
+section("uidemo: dialogs, menus, running a program")
+do
+  local env
+  local seen = {}
+  local function snap(key) return function() seen[key] = screenOf(env); return false end end
+  local events = factory.script(
+    false,
+    factory.press("ctrl+n"), snap("newDialog"), factory.typeText("Gold"), factory.press("enter"), snap("added"),
+    factory.press("delete"), snap("confirm"), factory.press("enter"), snap("deleted"),
+    factory.press("f10"), snap("menu"), factory.press("escape"), snap("menuClosed"),
+    factory.press("f10"), factory.press("down"), factory.press("down"), factory.press("down"),
+    factory.press("enter"), snap("runPrompt"), factory.press("enter"),
+    { "key_down", "kb-1", 32, 57, "player" }, -- "press any key" inside the program
+    snap("back"),
+    factory.press("ctrl+q")
+  )
+  env = factory.new({ maxW = 160, maxH = 50, events = events, endSignal = { "interrupted", 0 } })
+  local programOutput, _, ok, err = captureOutput(function() return runApp("apps/uidemo.lua", env) end)
+  check(ok, "uidemo ran: " .. tostring(err))
+  check(programOutput:find("Press any key", 1, true), "the program's own output went to the terminal")
+  local demo = package.loaded["ocui.apps.uidemo"]
+  check(seen.newDialog and findText(seen.newDialog, "Name of the new item:"), "Ctrl+N opened the prompt")
+  check(seen.added and findText(seen.added, "Added Gold"), "prompt result used")
+  check(seen.added and not findText(seen.added, "Name of the new item:"), "dialog gone after Enter")
+  check(seen.confirm and findText(seen.confirm, "Delete Gold?"), "Delete asks first")
+  check(seen.deleted and findText(seen.deleted, "Deleted Gold"), "confirmed with Enter")
+  eq(#demo.list.items, 6, "back to six items")
+  check(seen.menu and findText(seen.menu, "Run program..."), "F10 opened the File menu")
+  check(seen.menuClosed and not findText(seen.menuClosed, "Run program..."), "Escape closed it")
+  check(seen.runPrompt and findText(seen.runPrompt, "OpenOS command"), "menu item chosen with arrows + Enter")
+  eq(env.executed[1] and env.executed[1].cmd, "ls /", "the program ran through shell.execute")
+  check(env.termCalls.clear >= 1, "the terminal was cleared for it")
+  check(seen.back and findText(seen.back, "Back from: ls /"), "UI back after the program")
+  check(seen.back and findText(seen.back, "Copper"), "UI fully repainted after the program")
+  check(seen.back and not findText(seen.back, "program ls / ran"), "program output wiped")
+end
+
+section("uidemo: touch, double click, divider drag")
+do
+  local env
+  local seen = {}
+  local events = factory.script(
+    false,
+    { "touch", "screen-1", 5, 5, 0, "player" },          -- Iron Ore
+    { "touch", "screen-1", 5, 5, 0, "player" },          -- again at once: double click
+    function()
+      seen.sel = package.loaded["ocui.apps.uidemo"].list.selected
+      local demo = package.loaded["ocui.apps.uidemo"]
+      seen.focusIsName = demo.host.focused ~= demo.list and demo.host.focused.getValue ~= nil
+      seen.focusVisible = demo.host.focusVisible
+      return false
+    end,
+    { "touch", "screen-1", 71, 10, 0, "player" },        -- the divider
+    { "drag", "screen-1", 51, 10, 0, "player" },
+    { "drop", "screen-1", 51, 10, 0, "player" },
+    function() seen.screen = screenOf(env); return false end,
+    factory.press("ctrl+q")
+  )
+  env = factory.new({ maxW = 160, maxH = 50, events = events, endSignal = { "interrupted", 0 } })
+  local ok, err = runApp("apps/uidemo.lua", env)
+  check(ok, "uidemo ran: " .. tostring(err))
+  eq(seen.sel, 3, "touch selects the row")
+  check(seen.focusIsName, "double click activated the row (focus to the name field)")
+  eq(seen.focusVisible, false, "no focus highlight after touch input")
+  local split = package.loaded["ocui.apps.uidemo"].host:currentView().root.children[2]
+  eq(split.size, 50, "divider dragged to column 50")
+  local x = seen.screen and findText(seen.screen, "Details")
+  check(x and x < 60, "detail panel moved left with the divider")
+end
+
+-- Runs a widget tree built by build(host, ctx, out) on its own host.
+local function runTree(build, events, opts)
+  opts = opts or {}
+  opts.events = events
+  opts.endSignal = { "interrupted", 0 }
+  local env = factory.new(opts)
+  install(env)
+  local Pool = require("ocui.pool")
+  local Host = require("ocui.host")
+  local out = {}
+  local ok, err = pcall(Pool.runSingle, { name = "t", keyboard = true, start = function(ctx)
+    local host = Host.new({})
+    host:mount(ctx)
+    out.host = host
+    build(host, ctx, out)
+  end })
+  check(ok, "tree ran: " .. tostring(err))
+  return env, out
+end
+
+section("list: scrolling, scrollbar, keys")
+do
+  local items = {}
+  for i = 1, 100 do items[i] = "item " .. i end
+  local seen = {}
+  local env, out = runTree(function(host, _, o)
+    o.list = require("ocui.list").new({ items = items })
+    host:setView(o.list)
+    seen.list = o.list
+  end, factory.script(
+    false,
+    { "scroll", "screen-1", 5, 5, -1, "player" },
+    function() seen.top = seen.list.top; return false end,
+    factory.press("end"),
+    factory.press("pageUp"),
+    function() seen.sel = seen.list.selected; return false end,
+    { "touch", "screen-1", 80, 1, 0, "player" },        -- scrollbar, top
+    function() seen.top2 = seen.list.top; return false end,
+    { "drag", "screen-1", 80, 25, 0, "player" },        -- dragged to the bottom
+    { "drop", "screen-1", 80, 25, 0, "player" },
+    function() seen.top3 = seen.list.top; return false end,
+    factory.typeText("i")                                -- type-ahead
+  ))
+  eq(seen.top, 4, "wheel scrolls 3 rows")
+  eq(seen.sel, 75, "End then PageUp (25 rows)")
+  eq(seen.top2, 1, "scrollbar click at the top")
+  eq(seen.top3, 76, "scrollbar dragged to the bottom")
+  check(env.gpu._lastFrame():find("item 100", 1, true), "last item visible")
+  eq(out.list.selected, 76, "type-ahead: next item starting with 'i'")
+end
+
+section("text input: other keyboards, paste, UTF-8 editing")
+do
+  local env, out = runTree(function(host, _, o)
+    local root = require("ocui.widgets").VBox.new({})
+    o.input = root:add(require("ocui.textinput").new({ h = 1 }))
+    o.other = root:add(require("ocui.textinput").new({ h = 1 }))
+    host:setView(root)
+  end, factory.script(
+    false,
+    { "key_down", "kb-2", 97, 30, "player" },            -- a keyboard on another screen
+    factory.typeText("Привет"),
+    { "clipboard", "kb-1", " мир\n!", "player" },
+    factory.press("left"), factory.press("back"),
+    factory.press("ctrl+left"), factory.typeText("<"),
+    factory.press("tab"), factory.typeText("x")
+  ))
+  -- "Привет мир!" -> Left, Backspace eats the "р" -> Ctrl+Left to the
+  -- start of "ми" -> "<" inserted there
+  eq(out.input:getValue(), "Привет <ми!", "typed, pasted (newline dropped), edited by character")
+  eq(out.other:getValue(), "x", "Tab moved focus to the next field")
+  check(env.gpu._lastFrame():find("Привет <ми!", 1, true), "shown on screen")
+end
+
+section("host: no VRAM, drawing goes straight to the screen")
+do
+  local env, out = runTree(function(host, _, o)
+    o.input = require("ocui.textinput").new({ w = 20, h = 1 })
+    host:setView(o.input)
+  end, factory.script(false, factory.typeText("abc"), function()
+    return false
+  end), { noVram = true })
+  eq(out.host.buffer, 0, "no back buffer")
+  check(env.gpu._lastFrame():find("abc", 1, true), "typed text on screen")
+end
+
+section("layout: HBox / VBox / Split")
+do
+  install(factory.new({}))
+  local layout = require("ocui.layout")
+  local widgets = require("ocui.widgets")
+  local row = layout.HBox.new({ w = 50, h = 3, gap = 1 })
+  local a = row:add(widgets.Button.new({ text = "OK" }))           -- fixed 4
+  local b = row:add(widgets.Label.new({ text = "fill" }))          -- flex 1
+  local c = row:add(widgets.Label.new({ text = "x", flex = 2 }))
+  row:layout()
+  eq(a.x .. "/" .. a.w, "0/4", "fixed child keeps its width")
+  eq(b.x .. "/" .. b.w, "5/15", "flex 1 share")
+  eq(c.x .. "/" .. c.w, "21/29", "flex 2 share")
+  eq(b.h, 3, "children span the row's height")
+  row:layout()
+  eq(b.w, 15, "layout is stable when repeated")
+  local col = layout.VBox.new({ w = 10, h = 20 })
+  local top = col:add(widgets.Label.new({ h = 1 }))
+  local mid = col:add(widgets.Label.new({ flex = 1 }))
+  local bottom = col:add(widgets.Label.new({ h = 1 }))
+  col:layout()
+  eq(top.y .. "," .. mid.y .. "," .. mid.h .. "," .. bottom.y, "0,1,18,19", "VBox flex fills the middle")
+  bottom:setVisible(false)
+  col:layout()
+  eq(mid.h, 19, "a hidden child gives its room away")
+  local split = layout.Split.new({ w = 40, h = 10, size = 100, min = 5,
+    first = widgets.Label.new({}), second = widgets.Label.new({}) })
+  eq(split:firstSize(), 34, "size clamped to leave the second pane its minimum")
+end
 
 section("install.lua")
 do

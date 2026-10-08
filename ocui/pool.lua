@@ -7,6 +7,7 @@
 --     name = "hud",
 --     description = "one line for `ocpool list`",
 --     defaults = { ... },          -- config defaults; nil = no config file
+--     keyboard = true,             -- optional: takes typed input ('q' won't quit)
 --     start = function(ctx, config) ... end,
 --   }
 -- start() sets the app up and returns; all ongoing work is registered via
@@ -16,6 +17,7 @@
 --   ctx:every(seconds, fn)   periodic task (coroutine; may ctx.sleep/yield)
 --   ctx:spawn(fn)            long-running task
 --   ctx:on(signal, fn)       signal or in-process event handler (fn(name, ...))
+--   ctx:idle(fn)             runs after every loop round (see Loop:idle)
 --   ctx:emit(event, ...)     in-process event to every ctx:on(event) handler
 --   ctx:cancel(handle)       cancel one task/handler
 --   ctx:onStop(fn)           cleanup, run when the app stops for any reason
@@ -131,7 +133,10 @@ local function newRecord(module, kind)
   }
 end
 
+-- An app module with `keyboard = true` takes text input, so a plain 'q'
+-- must not quit the pool while it runs (it brings its own way out).
 function Pool:register(module)
+  if module.keyboard then self.loop.quitChar = false end
   if not self.apps[module.name] then
     table.insert(self.order, module.name)
   end
@@ -239,6 +244,7 @@ local function newContext(pool, rec, cfg)
   function ctx:every(interval, fn) return loop:every(interval, fn, rec) end
   function ctx:spawn(fn) return loop:spawn(fn, rec) end
   function ctx:on(name, fn) return loop:on(name, fn, rec) end
+  function ctx:idle(fn) return loop:idle(fn, rec) end
   function ctx:emit(name, ...) loop:emit(name, ...) end
   function ctx:cancel(handle)
     if handle.kind then loop:cancel(handle) else loop:off(handle) end

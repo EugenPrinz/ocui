@@ -2,6 +2,7 @@
 -- Concrete UI primitives built on top of ocui.widget.
 
 local base = require("ocui.widget")
+local theme = require("ocui.theme")
 local util = require("ocui.util")
 local Widget, Container = base.Widget, base.Container
 
@@ -23,7 +24,9 @@ function Label.new(props)
 end
 
 function Label:setText(text)
+  if text == self.text then return end
   self.text = text
+  self:invalidate()
 end
 
 function Label:draw(canvas)
@@ -64,7 +67,9 @@ end
 function ProgressBar:setValue(v)
   if v ~= v then v = 0 end -- NaN
   if v < 0 then v = 0 elseif v > 1 then v = 1 end
+  if v == self.value then return end
   self.value = v
+  self:invalidate()
 end
 
 function ProgressBar:caption()
@@ -116,38 +121,16 @@ function Panel:innerSize()
   return math.max(self.w - 2, 0), math.max(self.h - 2, 0)
 end
 
+function Panel:childOffset() return 1, 1 end
+function Panel:clientSize() return self:innerSize() end
+
 function Panel:draw(canvas)
   if self.bg then
     canvas:fillRect(0, 0, self.w, self.h, self.bg)
     canvas.bg = self.bg -- border, title and children sit on this surface
   end
   canvas:border(0, 0, self.w, self.h, self.borderColor, self.title)
-  local iw, ih = self:innerSize()
-  if iw <= 0 or ih <= 0 then return end
-  local inner = canvas:sub(1, 1, iw, ih)
-  for _, child in ipairs(self.children) do
-    if child.visible then
-      self:layoutChild(child, iw)
-      child:draw(inner:sub(child.x, child.y, child.w, child.h))
-    end
-  end
-end
-
-function Panel:onTouch(x, y, button)
-  local iw, ih = self:innerSize()
-  local lx, ly = x - 1, y - 1
-  if lx < 0 or ly < 0 or lx >= iw or ly >= ih then return false end
-  for i = #self.children, 1, -1 do
-    local child = self.children[i]
-    if child.visible then
-      self:layoutChild(child, iw)
-      local cx, cy = lx - child.x, ly - child.y
-      if child:contains(cx, cy) and child:onTouch(cx, cy, button) then
-        return true
-      end
-    end
-  end
-  return false
+  self:drawChildren(canvas)
 end
 
 -- ---------------------------------------------------------------- VStack --
@@ -196,22 +179,42 @@ function Button.new(props)
   self.fg = props.fg or 0xFFFFFF
   self.bg = props.bg or 0x33333D
   self.disabled = props.disabled
+  if self.focusable == nil then self.focusable = true end
   if self.w == nil then self.w = util.len(self.text) + 2 end
   return self
 end
 
 function Button:draw(canvas)
-  local fg = self.disabled and 0x6A6A75 or self.fg
-  canvas:fillRect(0, 0, self.w, self.h, self.bg)
+  local fg = self.disabled and theme.disabled or self.fg
+  local bg = self:showsFocus() and theme.buttonFocus or self.bg
+  canvas:fillRect(0, 0, self.w, self.h, bg)
   local text = util.truncate(self.text, self.w)
   local tx = math.max(math.floor((self.w - util.len(text)) / 2), 0)
-  canvas:text(tx, math.floor((self.h - 1) / 2), text, fg, self.bg)
+  canvas:text(tx, math.floor((self.h - 1) / 2), text, fg, bg)
+end
+
+function Button:setText(text)
+  if text == self.text then return end
+  self.text = text
+  self:invalidate()
+end
+
+function Button:press()
+  if self.disabled then return end
+  if self.onClick then self.onClick(self) end
 end
 
 function Button:onTouch()
-  if self.disabled then return true end
-  if self.onClick then self.onClick(self) end
+  self:press()
   return true
+end
+
+function Button:onKey(ev)
+  if ev.name == "enter" or ev.name == "space" then
+    self:press()
+    return true
+  end
+  return false
 end
 
 -- ---------------------------------------------------------------- Toggle --
@@ -229,21 +232,41 @@ function Toggle.new(props)
   self.fg = props.fg or 0xE4E4E8
   self.onColor = props.onColor or 0x4CD787
   self.disabled = props.disabled
+  if self.focusable == nil then self.focusable = true end
   return self
 end
 
 function Toggle:draw(canvas)
   local box = self.value and "[x]" or "[ ]"
-  local boxColor = self.disabled and 0x6A6A75 or (self.value and self.onColor or self.fg)
-  canvas:text(0, 0, box, boxColor)
-  canvas:text(4, 0, self.label, self.disabled and 0x6A6A75 or self.fg)
+  local boxColor = self.disabled and theme.disabled or (self.value and self.onColor or self.fg)
+  canvas:text(0, 0, box, boxColor, self:showsFocus() and theme.buttonFocus or nil)
+  canvas:text(4, 0, self.label, self.disabled and theme.disabled or self.fg)
+end
+
+function Toggle:setValue(value)
+  value = value and true or false
+  if value == self.value then return end
+  self.value = value
+  self:invalidate()
+end
+
+function Toggle:toggle()
+  if self.disabled then return end
+  self:setValue(not self.value)
+  if self.onChange then self.onChange(self.value) end
 end
 
 function Toggle:onTouch()
-  if self.disabled then return true end
-  self.value = not self.value
-  if self.onChange then self.onChange(self.value) end
+  self:toggle()
   return true
+end
+
+function Toggle:onKey(ev)
+  if ev.name == "space" or ev.name == "enter" then
+    self:toggle()
+    return true
+  end
+  return false
 end
 
 -- ----------------------------------------------------------------- Cycle --
@@ -265,6 +288,7 @@ function Cycle.new(props)
   self.fg = props.fg or 0xE4E4E8
   self.valueColor = props.valueColor or 0x4C8BF5
   self.disabled = props.disabled
+  if self.focusable == nil then self.focusable = true end
   return self
 end
 
@@ -274,10 +298,11 @@ end
 
 function Cycle:draw(canvas)
   local prefix = self:prefix()
-  local dim = 0x6A6A75
+  local dim = theme.disabled
   canvas:text(0, 0, prefix, self.disabled and dim or self.fg)
   local x = util.len(prefix)
-  canvas:text(x, 0, "< " .. self.format(self.value) .. " >", self.disabled and dim or self.valueColor)
+  canvas:text(x, 0, "< " .. self.format(self.value) .. " >", self.disabled and dim or self.valueColor,
+    self:showsFocus() and theme.selection or nil)
 end
 
 function Cycle:step(delta)
@@ -289,6 +314,7 @@ function Cycle:step(delta)
   end
   index = (index - 1 + delta) % n + 1
   self.value = self.options[index]
+  self:invalidate()
   if self.onChange then self.onChange(self.value) end
 end
 
@@ -297,6 +323,13 @@ function Cycle:onTouch(x)
   local left = util.len(self:prefix())
   self:step(x <= left + 1 and -1 or 1)
   return true
+end
+
+function Cycle:onKey(ev)
+  if self.disabled then return false end
+  if ev.name == "left" then self:step(-1); return true end
+  if ev.name == "right" or ev.name == "space" or ev.name == "enter" then self:step(1); return true end
+  return false
 end
 
 -- --------------------------------------------------------------- Stepper --
@@ -320,6 +353,7 @@ function Stepper.new(props)
   self.fg = props.fg or 0xE4E4E8
   self.buttonBg = props.buttonBg or 0x33333D
   self.disabled = props.disabled
+  if self.focusable == nil then self.focusable = true end
   self.hits = {}
   return self
 end
@@ -331,9 +365,9 @@ local function stepText(delta)
 end
 
 function Stepper:draw(canvas)
-  local dim = 0x6A6A75
+  local dim = theme.disabled
   local fg = self.disabled and dim or self.fg
-  canvas:text(0, 0, self.label .. ":", fg)
+  canvas:text(0, 0, self.label .. ":", fg, self:showsFocus() and theme.selection or nil)
   local x = self.labelWidth
   self.hits = {}
   local valueDrawn = false
@@ -354,20 +388,42 @@ function Stepper:draw(canvas)
   end
 end
 
+function Stepper:change(delta)
+  local v = self.value + delta
+  if self.min and v < self.min then v = self.min end
+  if self.max and v > self.max then v = self.max end
+  if v ~= self.value then
+    self.value = v
+    self:invalidate()
+    if self.onChange then self.onChange(v) end
+  end
+end
+
 function Stepper:onTouch(x)
   if self.disabled then return true end
   for _, hit in ipairs(self.hits) do
     if x >= hit.x0 and x <= hit.x1 then
-      local v = self.value + hit.delta
-      if self.min and v < self.min then v = self.min end
-      if self.max and v > self.max then v = self.max end
-      if v ~= self.value then
-        self.value = v
-        if self.onChange then self.onChange(v) end
-      end
+      self:change(hit.delta)
       return true
     end
   end
+  return true
+end
+
+-- Left/Right: the smallest step; PageUp/PageDown: the largest.
+function Stepper:onKey(ev)
+  if self.disabled then return false end
+  local small, big = math.huge, 0
+  for _, d in ipairs(self.steps) do
+    local a = math.abs(d)
+    if a < small then small = a end
+    if a > big then big = a end
+  end
+  if small == math.huge then return false end
+  local delta = ({ left = -small, right = small, down = -small, up = small,
+    pageDown = -big, pageUp = big })[ev.name or ""]
+  if not delta then return false end
+  self:change(delta)
   return true
 end
 
@@ -410,6 +466,7 @@ function Tabs:onTouch(x)
     if x >= hit.x0 and x <= hit.x1 then
       if hit.index ~= self.active then
         self.active = hit.index
+        self:invalidate()
         if self.onSelect then self.onSelect(hit.index) end
       end
       return true
@@ -451,6 +508,7 @@ end
 
 function Chart:setValues(values)
   self.values = values or {}
+  self:invalidate()
 end
 
 -- Averages `values` down to `n` columns (or right-aligns fewer).
@@ -564,5 +622,73 @@ function Chart:draw(canvas)
     end
   end
 end
+
+-- ------------------------------------------------------------- StatusBar --
+
+-- One row: nano-style key hints ("^S Save  ^Q Quit"), then a message, and
+-- text on the right.
+-- props: text, right, hints = { {key = "^S", label = "Save"}, ... },
+--        fg, bg, keyColor.
+local StatusBar = setmetatable({}, { __index = Widget })
+StatusBar.__index = StatusBar
+M.StatusBar = StatusBar
+
+function StatusBar.new(props)
+  local self = setmetatable(Widget.new(props), StatusBar)
+  self.text = props.text or ""
+  self.right = props.right or ""
+  self.hints = props.hints or {}
+  self.fg = props.fg or theme.text
+  self.bg = props.bg or theme.status
+  self.keyColor = props.keyColor or theme.statusKey
+  self.textColor = props.textColor
+  return self
+end
+
+-- setText(text[, color]): the message; nil color = the default.
+function StatusBar:setText(text, color)
+  text = text or ""
+  if text == self.text and color == self.textColor then return end
+  self.text, self.textColor = text, color
+  self:invalidate()
+end
+
+function StatusBar:setRight(text)
+  text = text or ""
+  if text == self.right then return end
+  self.right = text
+  self:invalidate()
+end
+
+function StatusBar:setHints(hints)
+  self.hints = hints or {}
+  self:invalidate()
+end
+
+function StatusBar:draw(canvas)
+  canvas:fillRect(0, 0, self.w, self.h, self.bg)
+  canvas.bg = self.bg
+  local x = 1
+  for _, hint in ipairs(self.hints) do
+    canvas:text(x, 0, hint.key, self.bg, self.keyColor)
+    x = x + util.len(hint.key)
+    local label = " " .. (hint.label or "")
+    canvas:text(x, 0, label, self.fg)
+    x = x + util.len(label) + 2
+  end
+  local rw = util.len(self.right)
+  if rw > 0 then canvas:text(math.max(self.w - rw - 1, x), 0, self.right, self.fg) end
+  if self.text ~= "" then
+    local room = self.w - x - (rw > 0 and rw + 2 or 1)
+    if room > 0 then canvas:text(x, 0, util.ellipsis(self.text, room), self.textColor or self.fg) end
+  end
+end
+
+-- The interactive widgets live in their own modules; they are re-exported
+-- here so `require("ocui.widgets")` gives the whole set.
+M.List = require("ocui.list")
+M.TextInput = require("ocui.textinput")
+local layout = require("ocui.layout")
+M.HBox, M.VBox, M.Split = layout.HBox, layout.VBox, layout.Split
 
 return M

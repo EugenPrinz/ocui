@@ -2,7 +2,9 @@
 
 UI toolkit for OpenComputers in GT New Horizons, with two front ends:
 
-- **screen** (GPU + monitor): Canvas / Widget / Container, double-buffered;
+- **screen** (GPU + monitor): widgets with keyboard focus, lists, text
+  fields, dialogs, menus and split panes, repainted only where they
+  changed;
 - **HUD** (AR glasses via a Glasses Terminal): retained-mode Rect / Text /
   Bar / Graph.
 
@@ -16,6 +18,7 @@ component API used was checked against those exact source tags.
 |---|---|---|
 | `hud` | On AR glasses: LSC charge %, stored/capacity, avg IN/OUT, a scrolling net-flow graph (green = charging, red = draining), time to full/empty, maintenance & wireless flags; below it the busy AE2 crafting CPUs with progress bar, % and ETA | Glasses Terminal + linked AR Glasses; Adapter on the LSC controller; Adapter on an ME Interface/Controller |
 | `dashboard` | On a screen: one panel per crafting CPU with output, progress %, ETA | T2+ GPU and screen; Adapter on an ME Interface/Controller |
+| `uidemo` | On a screen: a tour of the screen widgets — menu bar, list with columns, text fields, dialogs, split panes, status bar, running an OpenOS program and coming back. Keyboard and touch; Ctrl+Q quits | T3 GPU and screen, a keyboard on the screen |
 | `hudctl` | On a screen: control panel for the HUD (a profile per glasses terminal; show/hide panels and parts, anchor + offset per panel, width, text size, to-scale preview) and an **Energy** tab: live LSC numbers, net-flow and charge charts over 2 min / 1 h / 24 h, avg/min/max, EU in/out | T2+ GPU and screen (80x25+); an LSC for the Energy tab |
 
 The HUD and the dashboard get their data from shared **services**
@@ -125,14 +128,23 @@ ocui/                 the library — copy this whole folder to /lib/ocui
   pool.lua              apps + shared services, crash isolation, resources
   config.lua            /etc/ocui/<app>.cfg load/merge/serialize
   storage.lua           file I/O facade (swappable for tests)
-  util.lua              UTF-8-safe len/truncate (works on OC's Lua 5.2)
+  util.lua              UTF-8 helpers: len/sub/truncate/wrap (OC's Lua 5.2)
   format.lua            SI numbers, durations, bytes (safe for huge floats)
   canvas.lua            screen: GPU wrapper with nested clipping
-  widget.lua            screen: Widget, Container
+  host.lua              screen: owns a GPU + screen; views, overlays, focus,
+                        input routing, partial repaint, suspend/resume
+  keys.lua              screen: key codes and key events
+  widget.lua            screen: Widget, Container (focus, invalidate)
   widgets.lua           screen: Label, ProgressBar, Panel, VStack, Button,
-                        Toggle, Cycle, Stepper, Tabs, Chart (half-block)
+                        Toggle, Cycle, Stepper, Tabs, Chart (half-block),
+                        StatusBar (+ re-exports the ones below)
+  list.lua              screen: List (columns, scrolling, type-ahead)
+  textinput.lua         screen: TextInput (single line, UTF-8)
+  layout.lua            screen: HBox, VBox, Split
+  dialog.lua            screen: message / confirm / prompt dialogs
+  menu.lua              screen: pop-up menus, MenuBar
   theme.lua             screen: default palette
-  app.lua               screen: double-buffered UI mounted into a pool
+  app.lua               screen: a host + one widget tree, in one call
   hud.lua               glasses: Surface, Rect, Text, Bar, Graph, Group, anchors
   ae2.lua               data: crafting CPU tracker (progress + ETA)
   lsc.lua               data: Lapotronic Supercapacitor reader
@@ -143,18 +155,23 @@ ocui/                 the library — copy this whole folder to /lib/ocui
     hud.lua             app: glasses HUD (LSC + autocraft)
     hudctl.lua          app: HUD control panel + energy charts
     dashboard.lua       app: screen dashboard of crafting CPUs
+    uidemo.lua          app: widget demo
 
 apps/                  programs — copy to /home or /usr/bin
   ocpool.lua            the launcher/controller
   hud.lua               shortcut: hud alone
   hudctl.lua            shortcut: control panel (+ hud, or the background one)
   ae2_dashboard.lua     shortcut: dashboard alone
+  uidemo.lua            shortcut: widget demo
 
 install.lua            in-game installer/updater (Internet Card)
 
 mock/                  local test harness — never deployed in-game
-  component_factory.lua  fake OpenOS (component/computer/event, gpu,
-                         me_interface, LSC, glasses, threads, files, clock)
+  component_factory.lua  fake OpenOS (component/computer/event, gpu with
+                         call-budget accounting, screens + keyboards,
+                         me_interface, LSC, glasses, threads, shell, clock),
+                         key/typing signal helpers
+  memfs.lua              in-memory `filesystem`
   run_mock.lua           unit tests + app/pool/CLI scenarios with assertions
 ```
 
@@ -250,11 +267,21 @@ tests cover:
 - config merge and sandboxing;
 - `ocpool list`/`status`, foreground and background runs.
 
+Screen widget tests drive `uidemo` and small widget trees with scripted
+keys, touches, drags, wheel and clipboard signals: focus and Tab order,
+typing (Cyrillic included) and editing, dialogs and menus by keyboard,
+double click, scrollbar and divider drags, keys from a keyboard on
+another screen being ignored, a GPU without VRAM, and running an OpenOS
+program from the UI and coming back. The fake GPU charges OC's T3 call
+budget costs (set/fill/colors on the screen, bitblt by source size), so
+the tests also check that moving a list selection or typing costs a few
+hundredths of a tick's budget instead of a full-screen copy.
 OpenOS threads are faked: the "detached" pool runs synchronously until a
 scripted `quit`.
 
-It is **not** an OpenComputers emulator: no call budgets, no real font
-metrics, no real AE2/GT behavior beyond the documented shapes. It proves
+It is **not** an OpenComputers emulator: only the GPU's call budget is
+modelled, there are no real font metrics, no real AE2/GT behavior beyond
+the documented shapes. It proves
 the Lua runs and the layout and math are consistent; the final check is
 in-game.
 
@@ -317,6 +344,53 @@ Screen widgets: a widget's `w` may be left nil to fill its container;
 (has children); see `ocui/widgets.lua`. HUD elements are created once and
 mutated; call setters freely — unchanged values aren't re-sent.
 
+### Interactive screens (keyboard, dialogs, menus)
+
+For apps driven by the keyboard, use `ocui.host` directly (or
+`App.new({ ..., partial = true })`) and mark the module `keyboard = true`
+so a typed `q` doesn't quit the pool:
+
+```lua
+local Host    = require("ocui.host")
+local widgets = require("ocui.widgets")
+local Dialog  = require("ocui.dialog")
+
+return {
+  name = "notes", keyboard = true,
+  start = function(ctx)
+    local host = Host.new({ background = 0x0F0F14 })
+    host:mount(ctx)                        -- claims the GPU + screen
+    local root = widgets.VBox.new({})
+    local list = root:add(widgets.List.new({ flex = 1, items = { "a", "b" },
+      onActivate = function(i, item) Dialog.message(host, "Item", item) end }))
+    local status = root:add(widgets.StatusBar.new({ hints = { { key = "^Q", label = "Quit" } } }))
+    host:setView({ root = root, bindings = { ["ctrl+q"] = function() ctx:stop() end } })
+  end,
+}
+```
+
+- **Repainting.** Widgets call `self:invalidate()` when what they show
+  changes (the built-in ones do in their setters: `setText`, `setValue`,
+  `setItems`, `select`...). The host repaints only those rectangles, once
+  per loop round, into an off-screen buffer, and copies them to the screen
+  through a buffer of their own size — OC charges a copy by the size of
+  its source, so a changed row costs ~0.04 of a T3 tick's budget where a
+  full-screen copy costs 2.0. Assigning a widget's fields directly doesn't
+  repaint; call `invalidate()` after, or `host:damageAll()`.
+- **Keys.** A key goes to the focused widget's `onKey(ev)`, then up its
+  parents, then the view's `onKey` and `bindings` (`"ctrl+s"`, `"f2"`,
+  `"shift+tab"`...); an unhandled Tab moves focus. `ev.text` is the typed
+  character (UTF-8), `ev.name` the key (`"enter"`, `"left"`, `"a"`), plus
+  `ev.ctrl/shift/alt`. Only keyboards attached to the host's screen count.
+- **Focus.** `focusable` widgets take focus when touched or tabbed to;
+  buttons and toggles show a highlight only while the keyboard is in use.
+- **Overlays.** `Dialog.message/confirm/prompt/open` and `Menu.open` /
+  `MenuBar` are modal overlays; Escape closes them, a touch outside closes
+  a menu. `host:push(view)` / `host:pop()` stack full-screen views.
+- **Running a program.** `host:suspend(fn)` gives the screen back to
+  OpenOS while `fn` runs (e.g. `shell.execute("edit", nil, path)`) and
+  restores the UI afterwards — for a foreground app on the shell's screen.
+
 ## Known limitations
 
 - One app's long non-yielding work (or a slow component call) still
@@ -331,5 +405,8 @@ mutated; call setters freely — unchanged values aren't re-sent.
   item names are truncated a little conservatively.
 - Screen dashboard has no scrolling: CPUs beyond the screen height are
   clipped. The HUD shows `crafting.maxRows` busy CPUs and a `+N` count.
-- `Canvas:text` doesn't support left-edge clipping (not needed by the
-  bundled widgets).
+- `host:suspend` (running an OpenOS program from a UI) only makes sense
+  for an app in the foreground on the shell's own screen; the loop and
+  every other app in the pool wait while the program runs.
+- Screen apps are made for T3 (160x50, 256 colors); smaller screens work
+  but layouts are not tuned for them.
