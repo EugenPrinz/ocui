@@ -1252,7 +1252,8 @@ end
 local function runTree(build, events, opts)
   opts = opts or {}
   opts.events = events
-  opts.endSignal = { "interrupted", 0 }
+  -- keyboard apps ignore Ctrl+C's "interrupted": end with a signal of our own
+  opts.endSignal = { "test_end" }
   local env = factory.new(opts)
   install(env)
   local Pool = require("ocui.pool")
@@ -1261,6 +1262,7 @@ local function runTree(build, events, opts)
   local ok, err = pcall(Pool.runSingle, { name = "t", keyboard = true, start = function(ctx)
     local host = Host.new({})
     host:mount(ctx)
+    ctx:on("test_end", function() ctx:quitPool() end)
     out.host = host
     build(host, ctx, out)
   end })
@@ -1516,6 +1518,244 @@ do
   local frame = env.gpu._lastFrame() or ""
   check(frame:find("torus wire", 1, true), "4 = torus, M = wireframe (status line)")
   check(env.pulls() < #events + 3, "Q quit")
+end
+
+-- =============================================================== ned ==
+
+section("textbuffer: editing, UTF-8, undo, search")
+do
+  install(factory.new({}))
+  local TB = require("ocui.textbuffer")
+  local b = TB.new("hello\r\nмир\r\n")
+  eq(b:lineCount(), 2, "lines split, final newline remembered")
+  eq(b:lineLength(2), 3, "Cyrillic counted by character")
+  local stop = b:insert({ line = 2, col = 1 }, "XY\nZ")
+  eq(stop.line .. ":" .. stop.col, "3:1", "multi-line insert returns its end")
+  eq(b:line(2) .. "|" .. b:line(3), "мXY|Zир", "split inside a UTF-8 line")
+  eq(b:range({ line = 1, col = 3 }, { line = 2, col = 2 }), "lo\nмX", "range across lines")
+  eq(b:delete({ line = 2, col = 3 }, { line = 3, col = 1 }), "\nZ", "delete returns the text")
+  eq(b:line(2), "мXYир", "lines joined")
+  check(b:isModified(), "modified")
+  b:undo()
+  eq(b:line(3), "Zир", "undo restores the deletion")
+  b:undo()
+  eq(b:getText(), "hello\r\nмир\r\n", "undo back to the original, CRLF + final newline kept")
+  check(not b:isModified(), "unmodified again")
+  b:redo()
+  eq(b:line(2), "мXY", "redo")
+  -- typing merges into one undo step
+  local t = TB.new("")
+  local pos = { line = 1, col = 0 }
+  for _, ch in ipairs({ "a", "b", "c" }) do pos = t:insert(pos, ch) end
+  t:insert(pos, "\n")
+  t:undo()
+  eq(t:getText(), "abc", "newline is its own step")
+  t:undo()
+  eq(t:getText(), "", "the typed word is one step")
+  -- save point splits merging
+  t:insert({ line = 1, col = 0 }, "x")
+  t:markSaved()
+  t:insert({ line = 1, col = 1 }, "y")
+  check(t:isModified(), "typing after a save is a change")
+  t:undo()
+  check(not t:isModified(), "undoing back to the save point")
+  -- group
+  local g = TB.new("a b a")
+  g:group(function()
+    g:delete({ line = 1, col = 0 }, { line = 1, col = 1 })
+    g:insert({ line = 1, col = 0 }, "X")
+  end)
+  g:undo()
+  eq(g:getText(), "a b a", "group undone as one step")
+  -- find
+  local f = TB.new("one two\nthree two\nOne")
+  local a, z = f:find("two", { line = 1, col = 5 })
+  eq(a.line .. ":" .. a.col .. "-" .. z.col, "2:6-9", "find forward from the middle")
+  a = f:find("two", { line = 2, col = 7 })
+  eq(a.line .. ":" .. a.col, "1:4", "find wraps around")
+  a = f:find("two", { line = 2, col = 6 }, true)
+  eq(a.line .. ":" .. a.col, "1:4", "find backwards")
+  a = f:find("one", { line = 1, col = 1 }, false, true)
+  eq(a.line .. ":" .. a.col, "3:0", "ignore case")
+  eq(f:find("zzz", { line = 1, col = 0 }), nil, "not found")
+end
+
+section("syntax: Lua tokens and multi-line state")
+do
+  install(factory.new({}))
+  local syntax = require("ocui.syntax")
+  local lua = syntax.lua
+  local function kinds(line, state)
+    local spans, e = lua.tokenize(line, state)
+    local out = {}
+    for _, s in ipairs(spans) do out[#out + 1] = line:sub(s.from, s.to) .. "=" .. s.kind end
+    return table.concat(out, " "), e
+  end
+  eq((kinds('local x = "a\\"b" -- hi')), 'local=keyword "a\\"b"=string -- hi=comment', "keyword, escaped string, comment")
+  eq((kinds("return 0x1F, 3.5e2, nil")), "return=keyword 0x1F=number 3.5e2=number nil=constant", "numbers, constant")
+  eq((kinds("local function foo() print(1) end")),
+    "local=keyword function=keyword foo=func print=builtin 1=number end=keyword", "function name, builtin")
+  local text, state = kinds("x = 1 --[==[ open")
+  eq(state, "c:2", "long comment left open")
+  text, state = kinds("still ]=] in ]==] y = 2", state)
+  eq(text, "still ]=] in ]==]=comment 2=number", "closed by the matching level only")
+  eq(state, "", "back to normal")
+  local _, s2 = kinds("s = [[text")
+  eq(s2, "s:0", "long string state")
+  eq(syntax.forPath("/etc/ocui/hud.cfg"), lua, ".cfg highlighted as Lua")
+  eq(syntax.forPath("/home/notes.txt"), syntax.plain, "other files plain")
+end
+
+local NED_SAMPLE = [===[
+-- demo program
+local component = require("component")
+--[[ a long
+comment ]]
+local function greet(name)
+  print("Привет, " .. name .. "!")  -- say hi
+  return 42, 0x1F, true
+end
+greet("world")
+]===]
+
+-- Runs ned on `file` (with NED_SAMPLE as /home/demo.lua) and the events.
+local function runNed(events, opts)
+  opts = opts or {}
+  opts.maxW, opts.maxH = opts.maxW or 100, opts.maxH or 20
+  opts.events = events
+  opts.maxPulls = #events + 5
+  opts.endSignal = { "interrupted", 0 }
+  opts.files = opts.files or { ["/home/demo.lua"] = NED_SAMPLE }
+  local env = factory.new(opts)
+  if opts.onEnv then opts.onEnv(env) end
+  local out, _, ok, err = captureOutput(function()
+    return runApp("apps/ned.lua", env, opts.path or "/home/demo.lua")
+  end)
+  check(ok, "ned ran: " .. tostring(err))
+  return env, package.loaded["ocui.apps.ned"], out
+end
+
+section("ned: highlighting on screen, typing cost, cascade")
+do
+  local env
+  local seen = {}
+  local function snap(key) return function() seen[key] = screenOf(env); return false end end
+  local function color(key, x, y)
+    return function() seen[key] = string.format("%06X", (env.gpu._cell(x, y))); return false end
+  end
+  local function budget(key) return function() seen[key] = env.gpu._budget(); env.gpu._resetBudget(); return false end end
+  -- screen: title on row 1, line n on row n + 1, text from column 5
+  local events = factory.script(false,
+    color("local", 5, 3), color("require", 23, 3), color("string", 31, 3), color("comment", 5, 5),
+    color("func", 20, 6), color("number", 14, 8), color("constant", 26, 8), color("russian", 13, 7),
+    budget("start"),
+    factory.press("down"), factory.press("end"), budget("move"),
+    factory.typeText("x"), budget("typedCost"), snap("typed"),
+    factory.press("ctrl+home"), factory.typeText("--[["), color("cascade", 5, 3), snap("cascaded"),
+    factory.press("ctrl+z"), color("uncascade", 5, 3),
+    factory.press("ctrl+q"), factory.press("right"), factory.press("enter"))
+  runNed(events, { onEnv = function(e) env = e end })
+  eq(seen["local"], "C678DD", "keyword color")
+  eq(seen.require, "61AFEF", "builtin color")
+  eq(seen.string, "98C379", "string color")
+  eq(seen.comment, "7F848E", "inside a long comment")
+  eq(seen.func, "E5C07B", "function name color")
+  eq(seen.number, "D19A66", "number color")
+  eq(seen.constant, "D19A66", "true color")
+  eq(seen.russian, "98C379", "Cyrillic inside a string")
+  -- on this 100x20 screen a full repaint costs 2.0 and one row 0.1
+  check(seen.move and seen.move < 0.45,
+    "two cursor moves repaint the two rows + position (" .. tostring(seen.move) .. ")")
+  check(seen.typedCost and seen.typedCost < 0.25,
+    "typing a character repaints its row + title (" .. tostring(seen.typedCost) .. ")")
+  check(seen.typed and findText(seen.typed, 'require("component")x'), "typed at the end of line 2")
+  eq(seen.cascade, "7F848E", "opening --[[ on line 1 turns line 2 into a comment")
+  eq(seen.uncascade, "C678DD", "undo turns it back into code")
+  eq(env.files["/home/demo.lua"], NED_SAMPLE, "quit with Don't save left the file alone")
+end
+
+section("ned: selection, clipboard, cut lines, indent, undo")
+do
+  local events = factory.script(false,
+    factory.press("ctrl+end"), factory.press("enter"), factory.typeText("x = 1"),
+    factory.press("enter"),                                                          -- lines 10, 11
+    factory.press("shift+up"), factory.press("ctrl+c"),
+    { "interrupted", 0 },                                                            -- OpenOS's Ctrl+C signal
+    factory.press("ctrl+end"), factory.press("ctrl+v"),
+    factory.press("ctrl+home"), factory.press("ctrl+k"), factory.press("ctrl+k"),     -- cut lines 1-2
+    factory.press("ctrl+end"), factory.press("ctrl+u"),
+    factory.press("ctrl+home"), factory.press("shift+down"), factory.press("shift+down"),
+    factory.press("tab"),                                                            -- indent 2 lines
+    factory.press("ctrl+s"),
+    factory.press("ctrl+q"))
+  local env, ned = runNed(events)
+  local text = env.files["/home/demo.lua"] or ""
+  local lines = {}
+  for l in (text .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = l end
+  eq(lines[1], "  --[[ a long", "Tab indented the selected lines (1)")
+  eq(lines[2], "  comment ]]", "Tab indented the selected lines (2)")
+  eq(lines[3], "local function greet(name)", "the third line, not selected to its start, stays")
+  check(text:find('greet%("world"%)\nx = 1\nx = 1\n%-%- demo program\nlocal component = require%("component"%)\n'),
+    "copy + paste, and two cut lines pasted at the end:\n" .. text)
+  check(ned.editor ~= nil, "Ctrl+C (and its interrupted signal) did not quit")
+end
+
+section("ned: find, replace, go to, run, new file")
+do
+  local env, ned
+  local seen = {}
+  local events = factory.script(false,
+    factory.press("ctrl+f"), factory.typeText("greet"), factory.press("enter"),
+    function() seen.found = { ned().editor.cursor.line, ned().editor:selectedText() }; return false end,
+    factory.press("f3"),
+    function() seen.next = ned().editor.cursor.line; return false end,
+    factory.press("ctrl+r"), factory.press("ctrl+u"), factory.typeText("greet"), factory.press("enter"),
+    factory.typeText("hello"), factory.press("enter"),
+    function() seen.status = screenOf(env); return false end,
+    factory.press("ctrl+g"), factory.press("ctrl+u"), factory.typeText("3:4"), factory.press("enter"),
+    function() local c = ned().editor.cursor; seen.go = c.line .. ":" .. c.col; return false end,
+    factory.press("f5"), { "key_down", "kb-1", 32, 57, "player" },
+    function() seen.back = screenOf(env); return false end,
+    factory.press("ctrl+q"))
+  ned = function() return package.loaded["ocui.apps.ned"] end
+  local _, _, out = runNed(events, { onEnv = function(e) env = e end })
+  eq(seen.found and seen.found[1], 5, "Ctrl+F found the definition")
+  eq(seen.found and seen.found[2], "greet", "match selected")
+  eq(seen.next, 9, "F3: next match")
+  check(seen.status and findText(seen.status, "Replaced 2 occurrences"), "replace all")
+  eq(seen.go, "3:3", "Ctrl+G to line 3, column 4")
+  local text = env.files["/home/demo.lua"] or ""
+  check(text:find("local function hello%(name%)") and text:find('hello%("world"%)'), "saved before running")
+  eq(env.executed[1] and env.executed[1].cmd, "/home/demo.lua", "F5 ran the file")
+  check(out:find("program ended", 1, true), "the program's terminal output")
+  check(seen.back and findText(seen.back, "Ran /home/demo.lua"), "back in the editor")
+
+  -- a new, unnamed file: Ctrl+S asks for a name
+  local events2 = factory.script(false, factory.typeText("print(1)"), factory.press("ctrl+s"),
+    factory.press("ctrl+u"), factory.typeText("/home/new.lua"), factory.press("enter"), factory.press("ctrl+q"))
+  local env2 = factory.new({ maxW = 100, maxH = 20, events = events2, maxPulls = #events2 + 5,
+    endSignal = { "interrupted", 0 } })
+  local ok, err = runApp("apps/ned.lua", env2)
+  check(ok, "ned without a file: " .. tostring(err))
+  eq(env2.files["/home/new.lua"], "print(1)", "saved under the name typed in the prompt")
+end
+
+section("ned: long lines scroll sideways, tabs")
+do
+  local long = string.rep("abcdefghij", 30) .. "END"
+  local seen = {}
+  local env
+  local events = factory.script(false,
+    factory.press("end"), function() seen.endFrame = screenOf(env); return false end,
+    factory.press("home"), factory.press("down"), factory.press("end"),
+    function() seen.tabCol = package.loaded["ocui.apps.ned"].editor.cursor.col; return false end,
+    function() seen.tabFrame = screenOf(env); return false end,
+    factory.press("ctrl+q"))
+  runNed(events, { files = { ["/home/l.txt"] = long .. "\n\tx\ty\n" }, path = "/home/l.txt",
+    onEnv = function(e) env = e end })
+  check(seen.endFrame and findText(seen.endFrame, "hijEND"), "End scrolled to the end of a 303-char line")
+  eq(seen.tabCol, 4, "tab counts as one character")
+  check(seen.tabFrame and findText(seen.tabFrame, "  x y"), "tabs shown as spaces to the next stop")
 end
 
 section("install.lua")

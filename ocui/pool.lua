@@ -389,18 +389,21 @@ function Pool:onError(owner, err)
   end
 end
 
--- An app module with `keyboard = true` takes text input, so a plain 'q'
--- must not quit a foreground pool while such an app runs (it brings its
--- own way out).
+-- An app module with `keyboard = true` takes text input, so neither a
+-- plain 'q' nor Ctrl+C (OpenOS turns it into an "interrupted" signal; an
+-- editor wants it for Copy) may quit a foreground pool while such an app
+-- runs -- it brings its own way out. Ctrl+Alt+C still stops the pool.
 function Pool:updateQuitKey()
   if self.background then return end
   for _, app in pairs(self.apps) do
     if app.state == "running" and app.module.keyboard then
       self.loop.quitChar = false
+      self.loop.stopOnInterrupt = false
       return
     end
   end
   self.loop.quitChar = 113
+  self.loop.stopOnInterrupt = true
 end
 
 -- Services alone don't keep a foreground pool alive.
