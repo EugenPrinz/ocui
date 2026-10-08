@@ -58,6 +58,10 @@ function M.entries(base)
     local f = assert(io.open(base .. "/" .. path, "rb"))
     local text = M.normalize(f:read("a"))
     f:close()
+    -- a NUL byte makes git treat the file as binary: it would then keep
+    -- CRLF line ends and the checksum here would not match what GitHub
+    -- serves (write "\0" in Lua source instead)
+    assert(not text:find("\0", 1, true), path .. " contains a NUL byte")
     entries[#entries + 1] = { path, M.target(path), #text, M.checksum(text) }
   end
   return entries

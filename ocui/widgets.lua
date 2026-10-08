@@ -668,7 +668,7 @@ function TextBox:setLines(lines)
     return
   end
   local function key(line)
-    if type(line) == "table" then return tostring(line.text) .. " " .. tostring(line.color) end
+    if type(line) == "table" then return tostring(line.text) .. "\0" .. tostring(line.color) end
     return tostring(line)
   end
   for i = 1, math.min(math.max(#old, #lines), self.h) do

@@ -2107,6 +2107,12 @@ do
   eq(tool.normalize(manifestText), tool.render(current),
     "manifest.lua is up to date (run: lua tools/manifest.lua)")
   local manifest = load(manifestText, "=manifest", "t", {})()
+  -- every deployed file is stored by git as LF text, exactly as hashed
+  local eol = io.popen('git -C "' .. projectRoot .. '" ls-files --eol ocui apps boot')
+  for line in eol:lines() do
+    check(line:match("^i/lf"), "stored as LF text in git: " .. line)
+  end
+  eol:close()
 
   -- Runs install.lua against a fake internet serving this checkout (LF
   -- text, as raw GitHub does). opts: failOn (404 for that file), corrupt
